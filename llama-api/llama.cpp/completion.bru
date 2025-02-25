@@ -1,0 +1,24 @@
+meta {
+  name: completion
+  type: http
+  seq: 2
+}
+
+post {
+  url: http://127.0.0.1:8080/completion
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "prompt": "Please give me the Java implementation for the method printEmail using the following description: This method should print the email address of the customer to stdout. Only the missing lines, no explanation.",
+  "context": "package de.sub;public class E {\n\n   private  String email;\n    public String getEmail() {\n        return this.email;\n    }\n\npublic void setEmail(String email) {\n        this.email = email;\n    }\n\n    public static void printEmail() {\n        //generated start\n        //generated end\n    }\n}",
+  "temperature": 0.7,
+  "max_tokens": 256
+  }
+}
