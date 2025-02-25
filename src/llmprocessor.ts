@@ -48,3 +48,61 @@ export function processJavaFile(filePath: string) {
 
     fs.writeFileSync(filePath, content, 'utf8');
 }
+
+function sendPrompt(prompt: string): string {
+    let promptResult = '';
+
+    const testMsg = async(prompt: string) => {
+        try {
+            let response = await fetch("http://127.0.0.1:8080/completion", {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                prompt,
+                n_predict: 30,
+                stream: true,
+              }),
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+              }
+
+              if (!response.body) {
+                throw new Error('Response body is null');
+              }
+
+              const reader = response.body.getReader();
+              const decoder = new TextDecoder();
+              let result = '';
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                  break;
+                }
+                result += decoder.decode(value, { stream: true });
+
+                const lines = result.split('\n');
+                for (const line of lines) {
+                  if (line.startsWith('data:')) {
+                    try {
+                      const json = JSON.parse(line.substring(5).trim());
+                      console.log(json.content);
+                      let token = json.content;                      
+                    } catch (e) {
+                        console.error('Error parsing JSON:', e);
+                    }
+                }
+                result = lines[lines.length - 1];
+              }
+            }
+            promptResult = result;
+        } catch (error) {
+            console.error('Error:', error);
+        }
+    };
+
+    return promptResult;
+}
