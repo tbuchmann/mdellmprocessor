@@ -1,6 +1,11 @@
+import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as path from 'path';
+import axios from 'axios';
 
-export function processJavaFile(filePath: string) {
+const LLAMA_SERVER_URL = "http://127.0.0.1:8080/completion";
+
+export function processJavaFile(filePath: string, folderPath: string) {
     /*
     let content = fs.readFileSync(filePath, 'utf8');
 
@@ -43,13 +48,32 @@ export function processJavaFile(filePath: string) {
                       "\n    " + promptContent +  // Adjust indentation if needed
                       content.slice(openingBraceIndex + 1);
         }
+
+        // Extract the method name before the '{'
+        const methodRegex = /([a-zA-Z0-9_<>\[\]]+)\s+([a-zA-Z0-9_]+)\s*\([^)]*\)\s*\{/g;
+        let methodMatch;
+        let methodName = "UnknownMethod";
+
+        while ((methodMatch = methodRegex.exec(content)) !== null) {
+            if (methodMatch.index > javadocEndIndex) {
+                methodName = methodMatch[2]; // Extracts method name
+                break;
+            }
+        }
+
+        // Read all Java files in the folder as context
+        let contextText = getAllJavaFilesContent(folderPath);
+
+        // Send prompt + context to Llama server
+        sendToLlama(promptContent, methodName, contextText);
     }
 
 
-    fs.writeFileSync(filePath, content, 'utf8');
+    //fs.writeFileSync(filePath, content, 'utf8');
+    
 }
 
-function sendPrompt(prompt: string): string {
+function sendPrompt(prompt: string, method: string): string {
     let promptResult = '';
 
     const testMsg = async(prompt: string) => {
@@ -105,4 +129,25 @@ function sendPrompt(prompt: string): string {
     };
 
     return promptResult;
+}
+
+function getAllJavaFilesContent(folderPath: string): string {
+    const files = fs.readdirSync(folderPath).filter(file => file.endsWith(".java"));
+    return files.map(file => fs.readFileSync(path.join(folderPath, file), 'utf8')).join("\n\n");
+}
+
+async function sendToLlama(prompt: string, method: string, context: string) {
+    let request = `Please give me a Java implementation for the method ${method}. The following prompt describes the desired behavior:\n\n${prompt}\n\nContext:\n\n${context}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines.`;
+    try {
+        const response = await axios.post(LLAMA_SERVER_URL, {
+            prompt: request,
+            context: context,
+            temperature: 0.7,
+            max_tokens: 256
+        });
+
+        vscode.window.showInformationMessage("Llama Response: " + response.data.content);
+    } catch (error) {
+        vscode.window.showErrorMessage("Error communicating with Llama server: " + error);
+    }
 }

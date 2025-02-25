@@ -46,7 +46,7 @@ export function activate(context: vscode.ExtensionContext) {
 		  	// Add your logic here
 			for (const file of files) {
 				const filePath = path.join(uri.fsPath, file);
-				processJavaFile(filePath);
+				processJavaFile(filePath, uri.fsPath);
 			}
 			vscode.window.showInformationMessage("Processed Java files successfully.");
 		}
