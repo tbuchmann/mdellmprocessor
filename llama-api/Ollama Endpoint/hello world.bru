@@ -1,0 +1,19 @@
+meta {
+  name: hello world
+  type: http
+  seq: 3
+}
+
+post {
+  url: http://127.0.0.1:11434/api/generate
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "model": "deepseek-r1:7b",
+    "prompt": "hello",
+    "stream": false
+  }
+}

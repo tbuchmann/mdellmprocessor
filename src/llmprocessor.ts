@@ -65,14 +65,15 @@ export function processJavaFile(filePath: string, folderPath: string) {
         let contextText = getAllJavaFilesContent(folderPath);
 
         // Send prompt + context to Llama server
-        sendToLlama(promptContent, methodName, contextText);
+        //sendToLlama(promptContent, methodName, contextText);
+        sendToAI(promptContent, contextText, methodName);
     }
 
 
     //fs.writeFileSync(filePath, content, 'utf8');
     
 }
-
+/*
 function sendPrompt(prompt: string, method: string): string {
     let promptResult = '';
 
@@ -130,12 +131,13 @@ function sendPrompt(prompt: string, method: string): string {
 
     return promptResult;
 }
-
+*/
 function getAllJavaFilesContent(folderPath: string): string {
     const files = fs.readdirSync(folderPath).filter(file => file.endsWith(".java"));
     return files.map(file => fs.readFileSync(path.join(folderPath, file), 'utf8')).join("\n\n");
 }
 
+/*
 async function sendToLlama(prompt: string, method: string, context: string) {
     let request = `Please give me a Java implementation for the method ${method}. The following prompt describes the desired behavior:\n\n${prompt}\n\nContext:\n\n${context}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines.`;
     try {
@@ -151,3 +153,64 @@ async function sendToLlama(prompt: string, method: string, context: string) {
         vscode.window.showErrorMessage("Error communicating with Llama server: " + error);
     }
 }
+*/
+
+async function sendToAI(prompt: string, context: string, methodName: string) {
+  const config = vscode.workspace.getConfiguration("aiServer");
+  const serverType = config.get<string>("type", "llama");
+  
+  if (serverType === "llama") {
+      await sendToLlama(prompt, context, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"));
+  } else if (serverType === "ollama") {
+      await sendToOllama(prompt, context, methodName, config.get<string>("ollamaEndpoint", "http://localhost:11434/api/generate"));
+  } else {
+      vscode.window.showErrorMessage("Invalid AI server type selected.");
+  }
+}
+
+async function sendToLlama(prompt: string, context: string, methodName: string, endpoint: string) {
+  try {
+      const response = await axios.post(endpoint, {
+          prompt: prompt,
+          context: context,
+          temperature: 0.7,
+          max_tokens: 256
+      });
+
+      vscode.window.showInformationMessage(`Llama Response for ${methodName}: ${response.data.text}`);
+  } catch (error: any) {
+      handleRequestError(error, "Llama.cpp");
+  }
+}
+
+async function sendToOllama(prompt: string, context: string, methodName: string, endpoint: string) {
+  const jsonRequest = JSON.stringify({
+      model: "llama3.2:3b",  // Change model as needed
+      prompt: `Context:\n${context}\n\nQuestion:\n${prompt}`,
+      stream: false
+  });
+  console.log(jsonRequest);
+    try {
+      const response = await axios.post(endpoint, {
+          model: "llama3.2:3b",  // Change model as needed
+          prompt: `Context:\n${context}\n\nQuestion:\n${prompt}`,
+          //prompt: `hello`,
+          stream: false
+      });
+
+      vscode.window.showInformationMessage(`Ollama Response for ${methodName}: ${response.data.response}`);
+  } catch (error: any) {
+      handleRequestError(error, "Ollama");
+  }
+}
+
+function handleRequestError(error: any, serverName: string) {
+  if (error.response) {
+      vscode.window.showErrorMessage(`${serverName} API Error: ${error.response.status} - ${error.response.data}`);
+  } else if (error.request) {
+      vscode.window.showErrorMessage(`${serverName} API is unreachable. Check the server URL.`);
+  } else {
+      vscode.window.showErrorMessage(`Error sending request to ${serverName}: ${error.message}`);
+  }
+}
+

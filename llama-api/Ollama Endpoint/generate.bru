@@ -1,0 +1,19 @@
+meta {
+  name: generate
+  type: http
+  seq: 2
+}
+
+post {
+  url: http://127.0.0.1:11434/api/generate
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "model": "deepseek-r1:7b",
+    "prompt": "Context:\npublic class Test {\n    /**\n     * @prompt The method should print \"Hello World!\" to the console.\n     */\n    public static void main(String[] args) {\n        \n    }\n}\n\nQuestion:\nThe method should print \"Hello World!\" to the console.",
+    "stream": false
+  }
+}

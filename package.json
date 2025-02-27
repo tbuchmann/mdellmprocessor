@@ -14,6 +14,31 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "type": "object",
+      "title": "AI Server Settings",
+      "properties": {
+        "aiServer.type": {
+          "type": "string",
+          "default": "llama",
+          "enum": [
+            "llama",
+            "ollama"
+          ],
+          "description": "Choose between Llama.cpp and Ollama"
+        },
+        "aiServer.llamaEndpoint": {
+          "type": "string",
+          "default": "http://localhost:8080/completion",
+          "description": "The endpoint URL for the Llama.cpp server"
+        },
+        "aiServer.ollamaEndpoint": {
+          "type": "string",
+          "default": "http://localhost:11434/api/generate",
+          "description": "The endpoint URL for the Ollama server"
+        }
+      }
+    },
     "menus": {
       "explorer/context": [
         {
