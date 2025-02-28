@@ -185,15 +185,15 @@ async function sendToLlama(prompt: string, context: string, methodName: string, 
 
 async function sendToOllama(prompt: string, context: string, methodName: string, endpoint: string) {
   const jsonRequest = JSON.stringify({
-      model: "llama3.2:3b",  // Change model as needed
-      prompt: `Context:\n${context}\n\nQuestion:\n${prompt}`,
+      model: "qwen2.5-coder:7b",  // Change model as needed
+      prompt: `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines.`,
       stream: false
   });
   console.log(jsonRequest);
     try {
       const response = await axios.post(endpoint, {
-          model: "llama3.2:3b",  // Change model as needed
-          prompt: `Context:\n${context}\n\nQuestion:\n${prompt}`,
+          model: "qwen2.5-coder:7b",  // Change model as needed
+          prompt: `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines.`,
           //prompt: `hello`,
           stream: false
       });
