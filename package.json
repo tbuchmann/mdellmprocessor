@@ -36,6 +36,11 @@
           "type": "string",
           "default": "http://localhost:11434/api/generate",
           "description": "The endpoint URL for the Ollama server"
+        },
+        "aiServer.model": {
+          "type": "string",
+          "default": "qwen2.5-coder:7b",
+          "description": "The model to use for completion"
         }
       }
     },

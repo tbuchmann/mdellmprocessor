@@ -9,13 +9,19 @@ of the method to be implemented needs to be specified in a JavaDoc tag @prompt.
 
 ## Requirements
 
-The extension uses Llama.cpp as a backend for running local LLMs.
+There are currently two options for connecting to a LLM.
+
+### Llama.cpp
 
 Please checkout, build and run the latest Llama.cpp version following the official documentation that can be found in the corresponding [GitHub repository](https://github.com/ggml-org/llama.cpp)
 
 Download the desired language model of your choice from Huggingface. Please note that Llama.cpp requires the model to be in GGUF format!.
 Start the provided llama-server (from the examples subdirectory) using your model, e.g.
 ```./build/bin/llama-server -m models/gte-Qwen2-7B-instruct.Q4_K_M.gguf -c 2048```
+
+### Ollama
+
+Download and run Ollama, or connect to a remote Ollama instance (settings can be accessed in the extension)
 
 ## Using the extension
 

@@ -4,7 +4,7 @@ import * as path from 'path';
 import axios from 'axios';
 import { start } from 'repl';
 
-const LLAMA_SERVER_URL = "http://127.0.0.1:8080/completion";
+//const LLAMA_SERVER_URL = "http://127.0.0.1:8080/completion";
 
 export function processJavaFile(filePath: string, folderPath: string) {
     /*
@@ -167,18 +167,19 @@ async function sendToLlama(prompt: string, method: string, context: string) {
 async function sendToAI(prompt: string, context: string, methodName: string) : Promise<string> {
   const config = vscode.workspace.getConfiguration("aiServer");
   const serverType = config.get<string>("type", "llama");
+  const llmModel = config.get<string>("model", "qwen2.5-coder:7b");
   
   if (serverType === "llama") {
-      return await sendToLlama(prompt, context, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"));
+      return await sendToLlama(prompt, context, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"), llmModel);
   } else if (serverType === "ollama") {
-      return await sendToOllama(prompt, context, methodName, config.get<string>("ollamaEndpoint", "http://localhost:11434/api/generate"));
+      return await sendToOllama(prompt, context, methodName, config.get<string>("ollamaEndpoint", "http://localhost:11434/api/generate"), llmModel);
   } else {
       vscode.window.showErrorMessage("Invalid AI server type selected.");
       return "";
   }
 }
 
-async function sendToLlama(prompt: string, context: string, methodName: string, endpoint: string) : Promise<string> {
+async function sendToLlama(prompt: string, context: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
   try {
       const response = await axios.post(endpoint, {
           prompt: prompt,
@@ -195,16 +196,16 @@ async function sendToLlama(prompt: string, context: string, methodName: string, 
   }
 }
 
-async function sendToOllama(prompt: string, context: string, methodName: string, endpoint: string) : Promise<string> {
-  const jsonRequest = JSON.stringify({
-      model: "qwen2.5-coder:7b",  // Change model as needed
-      prompt: `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines.`,
-      stream: false
-  });
-  console.log(jsonRequest);
+async function sendToOllama(prompt: string, context: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
+//   const jsonRequest = JSON.stringify({
+//       model: "qwen2.5-coder:7b",  // Change model as needed
+//       prompt: `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines.`,
+//       stream: false
+//   });
+//  console.log(jsonRequest);
     try {
       const response = await axios.post(endpoint, {
-          model: "qwen2.5-coder:7b",  // Change model as needed
+          model: llmmodel,  // Change model as needed
           system: `You are an experienced Java programmer. I will ask you questions on how to implement the body of certain Java methods. In your answer, only give the statements for the method body. And output the raw data.`,
           prompt: `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines. Raw data only, no markdown.`,
           stream: false
