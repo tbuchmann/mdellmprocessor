@@ -22,3 +22,10 @@ Start the provided llama-server (from the examples subdirectory) using your mode
 Right click on a folder in your project that contains Java source files and run the Action "Process Java Files". 
 
 Please note: running a LLM locally is significantly slower than obtaining responses from ChatGPT or other publicly hosted models. Depending on the number of your Java source files and the methods containing JavaDoc comments including the @prompt tag, processing all requests may take a considerable time.
+
+## Tweaking the LLM
+
+### Qwen2.5-Coder7b (running on local ollama)
+
+System prompt:
+You are an experienced Java programmer. I will ask you questions on how to implement the body of certain Java methods. In your answer, only give the statements for the method body. And output the raw data.

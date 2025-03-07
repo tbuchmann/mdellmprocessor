@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import axios from 'axios';
+import { start } from 'repl';
 
 const LLAMA_SERVER_URL = "http://127.0.0.1:8080/completion";
 
@@ -38,16 +39,16 @@ export function processJavaFile(filePath: string, folderPath: string) {
         // Handle multi-line @prompt (stopping at '*/')
         promptContent = promptContent.split("\n").map(line => line.trim().replace(/^\*/, "").trim()).join(" ");
 
-        // Find the next '{' after the JavaDoc
+        // Find the next '//generated start' after the JavaDoc
         const javadocEndIndex = match.index + match[0].length;
-        const openingBraceIndex = content.indexOf('{', javadocEndIndex);
+        const startGenIndex = content.indexOf('//generated start', javadocEndIndex);
 
-        if (openingBraceIndex !== -1) {
-            // Insert the prompt content after '{'
-            content = content.slice(0, openingBraceIndex + 1) +
-                      "\n    " + promptContent +  // Adjust indentation if needed
-                      content.slice(openingBraceIndex + 1);
-        }
+        // if (openingBraceIndex !== -1) {
+        //     // Insert the prompt content after '{'
+        //     content = content.slice(0, openingBraceIndex + 1) +
+        //               "\n    " + promptContent +  // Adjust indentation if needed
+        //               content.slice(openingBraceIndex + 1);
+        // }
 
         // Extract the method name before the '{'
         const methodRegex = /([a-zA-Z0-9_<>\[\]]+)\s+([a-zA-Z0-9_]+)\s*\([^)]*\)\s*\{/g;
@@ -66,11 +67,19 @@ export function processJavaFile(filePath: string, folderPath: string) {
 
         // Send prompt + context to Llama server
         //sendToLlama(promptContent, methodName, contextText);
-        sendToAI(promptContent, contextText, methodName);
-    }
-
-
-    //fs.writeFileSync(filePath, content, 'utf8');
+        sendToAI(promptContent, contextText, methodName).then((llmGen) => {
+            if (startGenIndex !== -1) { 
+                // Insert the generated code between '//generated start' and '//generated end'
+                const endGenIndex = content.indexOf('//generated end', startGenIndex);
+                if (endGenIndex !== -1) {
+                    content = content.slice(0, startGenIndex + '//generated start'.length) +
+                            "\n" + llmGen + "\n" +
+                            content.slice(endGenIndex);
+                }
+                fs.writeFileSync(filePath, content, 'utf8');
+            }
+        });
+    }    
     
 }
 /*
@@ -155,20 +164,21 @@ async function sendToLlama(prompt: string, method: string, context: string) {
 }
 */
 
-async function sendToAI(prompt: string, context: string, methodName: string) {
+async function sendToAI(prompt: string, context: string, methodName: string) : Promise<string> {
   const config = vscode.workspace.getConfiguration("aiServer");
   const serverType = config.get<string>("type", "llama");
   
   if (serverType === "llama") {
-      await sendToLlama(prompt, context, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"));
+      return await sendToLlama(prompt, context, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"));
   } else if (serverType === "ollama") {
-      await sendToOllama(prompt, context, methodName, config.get<string>("ollamaEndpoint", "http://localhost:11434/api/generate"));
+      return await sendToOllama(prompt, context, methodName, config.get<string>("ollamaEndpoint", "http://localhost:11434/api/generate"));
   } else {
       vscode.window.showErrorMessage("Invalid AI server type selected.");
+      return "";
   }
 }
 
-async function sendToLlama(prompt: string, context: string, methodName: string, endpoint: string) {
+async function sendToLlama(prompt: string, context: string, methodName: string, endpoint: string) : Promise<string> {
   try {
       const response = await axios.post(endpoint, {
           prompt: prompt,
@@ -178,12 +188,14 @@ async function sendToLlama(prompt: string, context: string, methodName: string, 
       });
 
       vscode.window.showInformationMessage(`Llama Response for ${methodName}: ${response.data.text}`);
+      return response.data.text;
   } catch (error: any) {
       handleRequestError(error, "Llama.cpp");
+      return "";
   }
 }
 
-async function sendToOllama(prompt: string, context: string, methodName: string, endpoint: string) {
+async function sendToOllama(prompt: string, context: string, methodName: string, endpoint: string) : Promise<string> {
   const jsonRequest = JSON.stringify({
       model: "qwen2.5-coder:7b",  // Change model as needed
       prompt: `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines.`,
@@ -193,14 +205,16 @@ async function sendToOllama(prompt: string, context: string, methodName: string,
     try {
       const response = await axios.post(endpoint, {
           model: "qwen2.5-coder:7b",  // Change model as needed
-          prompt: `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines.`,
-          //prompt: `hello`,
+          system: `You are an experienced Java programmer. I will ask you questions on how to implement the body of certain Java methods. In your answer, only give the statements for the method body. And output the raw data.`,
+          prompt: `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines. Raw data only, no markdown.`,
           stream: false
       });
-
+      //processResponse(response.data.response, methodName);
       vscode.window.showInformationMessage(`Ollama Response for ${methodName}: ${response.data.response}`);
+      return response.data.response;
   } catch (error: any) {
       handleRequestError(error, "Ollama");
+      return "";
   }
 }
 
@@ -214,3 +228,12 @@ function handleRequestError(error: any, serverName: string) {
   }
 }
 
+/*
+function processResponse(response: any, methodName: string) {
+    // Assuming the response is a string containing the generated method body
+    const generatedCode = response.trim();
+
+    // Display the generated code in a VSCode information message
+    vscode.window.showInformationMessage(`Generated code for ${methodName}:\n${generatedCode}`);
+}
+*/
