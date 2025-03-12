@@ -1,6 +1,6 @@
-# mdellm README
+# VS Code Extension for combining MDE + LLM-Codegeneration
 
-This is the README for your extension "mdellm". After writing up a brief description, we recommend including the following sections.
+Description: 
 
 ## Features
 
