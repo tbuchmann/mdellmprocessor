@@ -1,0 +1,27 @@
+meta {
+  name: Prompt Lisa
+  type: http
+  seq: 1
+}
+
+post {
+  url: https://chat-1.ki-awz.iisys.de/api/chat/competions
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjNhNDEzYmEzLTU4MzQtNDcxYi05MzcxLWUyNjVlNzM3MjlkYSJ9.LroylmN_eLgUVwlMFLmjP0PYo-kIIUJ0mRaUYXWU-N4
+}
+
+body:json {
+  {
+    "model": "llama3.3:latest",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Why is the sky blue?"
+      }
+    ]
+  }
+}

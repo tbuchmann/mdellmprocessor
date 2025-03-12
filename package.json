@@ -1,7 +1,7 @@
 {
   "name": "mdellm",
-  "displayName": "mdellm",
-  "description": "",
+  "displayName": "MoProCo",
+  "description": "MoProCo - To Model, to prompt or to code? The choice is yours!",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.97.0"
