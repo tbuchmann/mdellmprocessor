@@ -31,24 +31,20 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 	
 			const files = fs.readdirSync(uri.fsPath).filter(file => file.endsWith(".java"));;
-			// const hasJavaFiles = files.some(file => file.endsWith(".java"));
 	
-			// if (!hasJavaFiles) {
-			// 	vscode.window.showErrorMessage("No Java files found in this folder.");
-			// 	return;
-			// }
 			if (files.length === 0) {
                 vscode.window.showErrorMessage("No Java files found in this folder.");
                 return;
             }
 	
 			vscode.window.showInformationMessage(`Processing folder: ${uri.fsPath}`);
-		  	// Add your logic here
+		  	
+			// Process files sequentially
 			for (const file of files) {
 				const filePath = path.join(uri.fsPath, file);
-				processJavaFile(filePath, uri.fsPath);
+				await processJavaFile(filePath, uri.fsPath);
 			}
-			vscode.window.showInformationMessage("Processed Java files successfully.");
+			vscode.window.showInformationMessage("Processed all Java files successfully.");
 		}
 	  );
 

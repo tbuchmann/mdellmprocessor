@@ -41,6 +41,20 @@
           "type": "string",
           "default": "qwen2.5-coder:7b",
           "description": "The model to use for completion"
+        },
+        "aiServer.systemPrompt": {
+          "type": "string",
+          "default": "You are an experienced Java programmer. I will ask you questions on how to implement the body of certain Java methods. In your answer, only give the statements for the method body. And output the raw data.",
+          "description": "System prompt to use for the AI model"
+        },
+        "aiServer.ollamaApiApproach": {
+          "type": "string",
+          "default": "generate",
+          "enum": [
+            "generate",
+            "chat"
+          ],
+          "description": "Choose between generate API and chat API for Ollama"
         }
       }
     },
@@ -83,6 +97,7 @@
     "typescript": "^5.7.3"
   },
   "dependencies": {
-    "axios": ">=1.8.2"
+    "axios": ">=1.8.2",
+    "ollama": "^0.5.0"
   }
 }
