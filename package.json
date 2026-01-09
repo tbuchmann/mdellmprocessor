@@ -10,7 +10,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:mdellm.processJavaFolder"
+    "onCommand:mdellm.processJavaFolder",
+    "onLanguage:java"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -68,8 +69,9 @@
     },
     "commands": [
       {
-        "command": "mdellm.helloWorld",
-        "title": "Hello World"
+        "command": "mdellm.addToDiagram",
+        "title": "In Klassendiagramm übernehmen",
+        "icon": "$(graph)"
       },
       {
         "command": "mdellm.processJavaFolder",

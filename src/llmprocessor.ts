@@ -96,6 +96,9 @@ export async function processJavaFile(filePath: string, folderPath: string) {
                 if (llmGen) {
                     // Re-read content to account for previous insertions
                     content = fs.readFileSync(filePath, 'utf8');
+
+                    // TODO: check if the answer contains ```java ... ``` and extract only the code part
+                    // For now, we assume the response is raw code
                     
                     // Recalculate indices based on updated content
                     const updatedStartGenIndex = content.indexOf('//generated start', matchItem.javadocEndIndex);
