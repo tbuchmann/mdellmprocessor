@@ -1,32 +1,10 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { processJavaFile } from './llmprocessor';
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	//console.log('Congratulations, your extension "mdellm" is now active!');
-
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	// let disposable = vscode.commands.registerCommand('mdellm.addToDiagram', (range: vscode.Range) => {
-	// 	const editor = vscode.window.activeTextEditor;
-    //     if (!editor) return;
-
-    //     // Extrahiere den Text der gesamten Methode
-    //     const methodText = editor.document.getText(range);
-        
-    //     // Hier folgt deine DSL-Logik
-    //     console.log("Analysiere Code für DSL:", methodText);
-    //     vscode.window.showInformationMessage("Methodenkopf und Rumpf in DSL übernommen!");
-	// });
 	let commandDisposable = vscode.commands.registerCommand('myExtension.addToDiagram', async (methodRange: vscode.Range) => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) return;
@@ -34,7 +12,7 @@ export function activate(context: vscode.ExtensionContext) {
         const doc = editor.document;
         const fullMethodText = doc.getText(methodRange);
 
-        // 1. Extraktion des Codes zwischen den Kommentaren
+        // 1. Extract code between markers
         const startMarker = "//generated start";
         const endMarker = "//generated end";
         const startIndex = fullMethodText.indexOf(startMarker);
@@ -47,39 +25,40 @@ export function activate(context: vscode.ExtensionContext) {
 
         const extractedCode = fullMethodText.substring(startIndex + startMarker.length, endIndex).trim();
 
-        // 2. Metadaten bestimmen (Klassenname und Methodenname)
-        // Wir nutzen die Symbole erneut, um den Namen der Methode zu finden
+        // 2. Retrieve metadata (class and method names)        
         const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>('vscode.executeDocumentSymbolProvider', doc.uri);
         const methodSymbol = findSymbolAtRange(symbols || [], methodRange);
         const classSymbol = findParentClass(symbols || [], methodRange);
 
         if (!methodSymbol || !classSymbol) {
-            vscode.window.showErrorMessage("Klasse oder Methode konnte nicht identifiziert werden.");
+            vscode.window.showErrorMessage("Class or method could not be identified.");
             return;
         }
 
-        const methodName = methodSymbol.name.split('(')[0].trim(); // Falls Java-LS Signatur liefert
+        const methodName = methodSymbol.name.split('(')[0].trim(); // if Java-LS gives the signature
         const className = classSymbol.name;
 
-        // 3. .cdiag Datei im Workspace finden
+        // 3. Find .cdiag in Workspace 
         const cdiagFiles = await vscode.workspace.findFiles('**/*.cdiag');
         if (cdiagFiles.length === 0) {
             vscode.window.showErrorMessage("Keine .cdiag Datei im Projekt gefunden.");
             return;
         }
 
-        // Wir nehmen hier die erste gefundene (oder implementiere Logik zur Auswahl)
+        // we take the first match 
+        // TODO implement selecting the correct .cdiag if multiple exist
         const cdiagUri = cdiagFiles[0];
         const cdiagDoc = await vscode.workspace.openTextDocument(cdiagUri);
         const cdiagText = cdiagDoc.getText();
 
-        // 4. In DSL einfügen via Regex
-        // Sucht nach der Klasse, dann nach der Methode, dann nach der öffnenden Klammer
-        // Nutzt ein Multiline-Regex, um die Struktur zu finden
+        // 4. Insert into DSL via Regex
+        // searches the class, then the method, then the opening {
+        // uses multiline regex to find the structure
+        // (Google Gemini helped)
         const newImpl = `impl java << ${extractedCode} >>`;
         
-        // Simpler Ansatz: Suche nach der Operation innerhalb der Klasse
-        // Dies ist ein Regex-Beispiel, das die geschweifte Klammer der Operation findet
+        // simple approach: look for the operation within the class
+        // this regex retrieves the opening { of the operation
         const escapedMethodName = methodName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const methodRegex = new RegExp(`(${escapedMethodName}\\s*\\([^)]*\\)\\s*(?::\\s*\\w+)?\\s*\\{)`, 'm');
 
@@ -89,7 +68,7 @@ export function activate(context: vscode.ExtensionContext) {
             const insertPosition = match.index + match[0].length;
             const updatedContent = cdiagText.slice(0, insertPosition) + "\n     " + newImpl + cdiagText.slice(insertPosition);
             
-            // Datei speichern
+            // save file
             const edit = new vscode.WorkspaceEdit();
             edit.replace(cdiagUri, new vscode.Range(0, 0, cdiagDoc.lineCount, 0), updatedContent);
             await vscode.workspace.applyEdit(edit);
@@ -126,12 +105,12 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	  );
 
-	// CodeLens Provider: Platziert den Button
+	// CodeLens Provider: places the button above methods with the marker
     let codeLensDisposable = vscode.languages.registerCodeLensProvider('java', {
         async provideCodeLenses(document: vscode.TextDocument) {
             const lenses: vscode.CodeLens[] = [];
             
-            // 1. Hole alle Symbole (Methoden, Klassen) vom Java Language Server
+            // 1. fetches all symbols (methods, classes) from the Java LS
             const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
                 'vscode.executeDocumentSymbolProvider', 
                 document.uri
@@ -139,19 +118,19 @@ export function activate(context: vscode.ExtensionContext) {
 
             if (!symbols) return [];
 
-            // 2. Suche im Dokument nach deinem Marker
+            // 2. looks for our marker in the document
             for (let i = 0; i < document.lineCount; i++) {
                 const line = document.lineAt(i);
                 if (line.text.includes("//generated start")) {
                     
-                    // 3. Finde die Methode, die diesen Marker enthält
+                    // 3. finds method containing this marker
                     const methodSymbol = findEnclosingMethod(symbols, line.range);
 
                     if (methodSymbol) {
                         lenses.push(new vscode.CodeLens(methodSymbol.range, {
-                            title: "✨ In Klassendiagramm übernehmen",
+                            title: "✨ Add to class diagram",
                             command: "myExtension.addToDiagram",
-                            arguments: [methodSymbol.range] // Die ganze Methode übergeben
+                            arguments: [methodSymbol.range] // pass the whole method range
                         }));
                     }
                 }
@@ -167,15 +146,15 @@ export function activate(context: vscode.ExtensionContext) {
 // This method is called when your extension is deactivated
 export function deactivate() {}
 
-// Hilfsfunktion: Sucht rekursiv nach der Methode, die die Position umschließt
+// Helper: searches recursively for the method which encloses the current position
 function findEnclosingMethod(symbols: vscode.DocumentSymbol[], range: vscode.Range): vscode.DocumentSymbol | undefined {
     for (const symbol of symbols) {
         if (symbol.range.contains(range)) {
-            // Wenn das Symbol eine Methode ist (Kind 5 in VS Code Java)
+            // if the symbol is a method, return it
             if (symbol.kind === vscode.SymbolKind.Method) {
                 return symbol;
             }
-            // Sonst in den Kindern weitersuchen (z.B. innerhalb einer Klasse)
+            // continue searching in the children elements otherwise (i.e. within a class)
             if (symbol.children && symbol.children.length > 0) {
                 const child = findEnclosingMethod(symbol.children, range);
                 if (child) return child;
@@ -185,7 +164,7 @@ function findEnclosingMethod(symbols: vscode.DocumentSymbol[], range: vscode.Ran
     return undefined;
 }
 
-// Hilfsfunktionen für die Symbolsuche
+// helper for searching symbols
 function findSymbolAtRange(symbols: vscode.DocumentSymbol[], range: vscode.Range): vscode.DocumentSymbol | undefined {
     for (const s of symbols) {
         if (s.range.contains(range) && s.kind === vscode.SymbolKind.Method) return s;
