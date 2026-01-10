@@ -45,7 +45,7 @@
         },
         "aiServer.systemPrompt": {
           "type": "string",
-          "default": "You are an experienced Java programmer. I will ask you questions on how to implement the body of certain Java methods. In your answer, only give the statements for the method body. And output the raw data.",
+          "default": "You are an experienced Java programmer. I will ask you questions on how to implement the body of certain Java methods. In your answer, only give the statements for the method body. And output the raw data. Do not include any explanations or additional text.",
           "description": "System prompt to use for the AI model"
         },
         "aiServer.ollamaApiApproach": {
@@ -70,7 +70,7 @@
     "commands": [
       {
         "command": "mdellm.addToDiagram",
-        "title": "In Klassendiagramm übernehmen",
+        "title": "Add to Class Diagram",
         "icon": "$(graph)"
       },
       {
