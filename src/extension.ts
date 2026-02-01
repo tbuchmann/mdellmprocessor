@@ -54,7 +54,7 @@ export function activate(context: vscode.ExtensionContext) {
         // 4. Insert into DSL via Regex
         // searches the class, then the method, then the opening {
         // uses multiline regex to find the structure
-        // (Google Gemini helped)
+        // (Google Gemini helped a lot)
         const newImpl = `impl java << ${extractedCode} >>`;
         
         // simple approach: look for the operation within the class
