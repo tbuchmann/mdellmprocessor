@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { processJavaFile } from './llmprocessor';
+import { processJavaFile, sendToAI as sendToAILLM, extractJavaCode, normalizeCodeWhitespace, getAllJavaFilesContentExported } from './llmprocessor';
 
 export function activate(context: vscode.ExtensionContext) {
 
@@ -36,7 +36,12 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         const methodName = methodSymbol.name.split('(')[0].trim(); // if Java-LS gives the signature
+        const methodSignature = methodSymbol.name; // Full signature including parameters
         const className = classSymbol.name;
+
+        // Convert Java parameter notation to UML notation
+        // Java: method(Type param) -> UML: method(param: Type)
+        const umlSignature = convertToUMLSignature(methodSignature);
 
         // 3. Find .cdiag in Workspace 
         const cdiagFiles = await vscode.workspace.findFiles('**/*.cdiag');
@@ -56,12 +61,19 @@ export function activate(context: vscode.ExtensionContext) {
         // then finds the spec "..." and inserts after it
         const newImpl = `impl java << ${extractedCode} >>`;
         
-        // regex to find: method_name(...) { ... spec "..." }
-        // we need to insert after the spec "..." line
-        const escapedMethodName = methodName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const methodRegex = new RegExp(`(${escapedMethodName}\\s*\\([^)]*\\)\\s*(?::\\s*\\w+)?\\s*\\{\\s*spec\\s+"[^"]*")`, 'm');
-
-        const match = methodRegex.exec(cdiagText);
+        // First, try to match using the UML signature (method_name with UML parameters)
+        // If that fails, fall back to just the method name
+        let escapedMethodName = umlSignature.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        let methodRegex = new RegExp(`(${escapedMethodName}\\s*(?::\\s*\\w+)?\\s*\\{\\s*spec\\s+"[^"]*")`, 'm');
+        
+        let match = methodRegex.exec(cdiagText);
+        
+        // Fallback: if UML signature doesn't match, try just the method name
+        if (!match) {
+            escapedMethodName = methodName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            methodRegex = new RegExp(`(${escapedMethodName}\\s*\\([^)]*\\)\\s*(?::\\s*\\w+)?\\s*\\{\\s*spec\\s+"[^"]*")`, 'm');
+            match = methodRegex.exec(cdiagText);
+        }
 
         if (match) {
             const insertPosition = match.index + match[0].length;
@@ -104,6 +116,99 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	  );
 
+	// Register regenerate command
+	let regenerateDisposable = vscode.commands.registerCommand('mdellm.regenerateMethod', async (methodRange: vscode.Range) => {
+		const editor = vscode.window.activeTextEditor;
+		if (!editor) return;
+
+		const doc = editor.document;
+		const fullMethodText = doc.getText(methodRange);
+
+		// 1. Extract prompt from JavaDoc
+		const promptMatch = fullMethodText.match(/\/\*\*[\s\S]*?@prompt\s+([\s\S]*?)\*\//);
+		if (!promptMatch) {
+			vscode.window.showErrorMessage("@prompt tag not found in method JavaDoc");
+			return;
+		}
+
+		let promptContent = promptMatch[1].trim();
+		promptContent = promptContent.split("\n").map(line => line.trim().replace(/^\*/, "").trim()).join(" ");
+
+		// 2. Extract code between markers
+		const startMarker = "// generated start";
+		const endMarker = "// generated end";
+		const startIndex = fullMethodText.indexOf(startMarker);
+		const endIndex = fullMethodText.indexOf(endMarker);
+
+		if (startIndex === -1 || endIndex === -1) {
+			vscode.window.showErrorMessage("Markers '// generated start/end' not found in method");
+			return;
+		}
+
+		// 3. Get method name
+		const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>('vscode.executeDocumentSymbolProvider', doc.uri);
+		const methodSymbol = findSymbolAtRange(symbols || [], methodRange);
+		
+		if (!methodSymbol) {
+			vscode.window.showErrorMessage("Could not identify method");
+			return;
+		}
+
+		const methodName = methodSymbol.name.split('(')[0].trim();
+
+		// 4. Get context from folder
+		const folderPath = vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath;
+		if (!folderPath) {
+			vscode.window.showErrorMessage("Workspace folder not found");
+			return;
+		}
+
+		// 5. Send to LLM
+		vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: `Regenerating method: ${methodName}`,
+				cancellable: false,
+			},
+			async (progress) => {
+				const contextText = getAllJavaFilesContentExported(folderPath);
+				const llmResponse = await sendToAILLM(promptContent, contextText, methodName);
+
+				if (llmResponse) {
+					try {
+						const extractedCode = extractJavaCode(llmResponse);
+						const normalizedCode = normalizeCodeWhitespace(extractedCode);
+
+						if (!normalizedCode) {
+							throw new Error('Empty code generated');
+						}
+
+						// 6. Replace in editor
+						const docContent = doc.getText();
+						const startMarkerIndex = docContent.indexOf('// generated start', doc.offsetAt(methodRange.start));
+						const endMarkerIndex = docContent.indexOf('// generated end', startMarkerIndex);
+
+						if (startMarkerIndex === -1 || endMarkerIndex === -1) {
+							throw new Error('Markers not found in document');
+						}
+
+						const startPos = doc.positionAt(startMarkerIndex + startMarker.length);
+						const endPos = doc.positionAt(endMarkerIndex);
+
+						const edit = new vscode.WorkspaceEdit();
+						edit.replace(doc.uri, new vscode.Range(startPos, endPos), "\n" + normalizedCode + "\n");
+						await vscode.workspace.applyEdit(edit);
+						await doc.save();
+
+						vscode.window.showInformationMessage(`Successfully regenerated method: ${methodName}`);
+					} catch (error: any) {
+						vscode.window.showErrorMessage(`Error inserting generated code: ${error.message}`);
+					}
+				}
+			}
+		);
+	});
+
 	// CodeLens Provider: places the button above methods with the marker
     let codeLensDisposable = vscode.languages.registerCodeLensProvider('java', {
         async provideCodeLenses(document: vscode.TextDocument) {
@@ -117,19 +222,30 @@ export function activate(context: vscode.ExtensionContext) {
 
             if (!symbols) return [];
 
-            // 2. looks for our marker in the document
+            // 2. looks for our markers and @prompt tags in the document
             for (let i = 0; i < document.lineCount; i++) {
                 const line = document.lineAt(i);
-                if (line.text.includes("// generated start")) {
-                    
-                    // 3. finds method containing this marker
+                
+                // Check for @prompt in JavaDoc
+                if (line.text.includes("@prompt")) {
                     const methodSymbol = findEnclosingMethod(symbols, line.range);
-
+                    if (methodSymbol) {
+                        lenses.push(new vscode.CodeLens(methodSymbol.range, {
+                            title: "🔄 Regenerate",
+                            command: "mdellm.regenerateMethod",
+                            arguments: [methodSymbol.range]
+                        }));
+                    }
+                }
+                
+                // Check for generated start marker
+                if (line.text.includes("// generated start")) {
+                    const methodSymbol = findEnclosingMethod(symbols, line.range);
                     if (methodSymbol) {
                         lenses.push(new vscode.CodeLens(methodSymbol.range, {
                             title: "✨ Add to model",
                             command: "myExtension.addToDiagram",
-                            arguments: [methodSymbol.range] // pass the whole method range
+                            arguments: [methodSymbol.range]
                         }));
                     }
                 }
@@ -138,7 +254,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-	context.subscriptions.push(commandDisposable, codeLensDisposable);
+	context.subscriptions.push(commandDisposable, codeLensDisposable, regenerateDisposable);
 	context.subscriptions.push(command);
 }
 
@@ -162,7 +278,36 @@ function findEnclosingMethod(symbols: vscode.DocumentSymbol[], range: vscode.Ran
     }
     return undefined;
 }
+/**
+ * Converts Java parameter notation to UML notation
+ * Java: method(Type param, String name) -> UML: method(param: Type, name: String)
+ */
+function convertToUMLSignature(javaSignature: string): string {
+    // Extract method name and parameters
+    const match = javaSignature.match(/^([a-zA-Z0-9_]+)\s*\(([^)]*)\)(.*)$/);
+    if (!match) {
+        return javaSignature;
+    }
 
+    const methodName = match[1];
+    const paramString = match[2];
+    const returnType = match[3];
+
+    // Convert parameters from "Type name" to "name: Type"
+    const params = paramString.split(',').map(p => p.trim()).filter(p => p.length > 0);
+    const umlParams = params.map(param => {
+        // Match pattern: [modifiers] Type name
+        const paramMatch = param.match(/^(?:\w+\s+)*([a-zA-Z0-9_<>\[\].,\s]+)\s+([a-zA-Z0-9_]+)(?:\s*=.*)?$/);
+        if (paramMatch) {
+            const type = paramMatch[1].trim();
+            const name = paramMatch[2].trim();
+            return `${name}: ${type}`;
+        }
+        return param;
+    }).join(', ');
+
+    return `${methodName}(${umlParams})${returnType}`;
+}
 // helper for searching symbols
 function findSymbolAtRange(symbols: vscode.DocumentSymbol[], range: vscode.Range): vscode.DocumentSymbol | undefined {
     for (const s of symbols) {

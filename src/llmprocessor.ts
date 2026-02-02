@@ -10,7 +10,7 @@ import { Ollama } from 'ollama';
 /**
  * Extracts Java code from LLM response, handling markdown code blocks
  */
-function extractJavaCode(response: string): string {
+export function extractJavaCode(response: string): string {
     // Check if response contains markdown code blocks
     const codeBlockMatch = response.match(/```(?:java)?\n([\s\S]*?)```/m);
     if (codeBlockMatch && codeBlockMatch[1]) {
@@ -24,7 +24,7 @@ function extractJavaCode(response: string): string {
 /**
  * Normalizes whitespace in generated code
  */
-function normalizeCodeWhitespace(code: string): string {
+export function normalizeCodeWhitespace(code: string): string {
     return code
         .split('\n')
         .map(line => line.trimEnd())
@@ -241,6 +241,10 @@ function getAllJavaFilesContent(folderPath: string): string {
     return files.map(file => fs.readFileSync(path.join(folderPath, file), 'utf8')).join("\n\n");
 }
 
+export function getAllJavaFilesContentExported(folderPath: string): string {
+    return getAllJavaFilesContent(folderPath);
+}
+
 function getSystemPrompt(): string {
   const config = vscode.workspace.getConfiguration("aiServer");
   return config.get<string>("systemPrompt", "You are an experienced Java programmer. I will ask you questions on how to implement the body of certain Java methods. In your answer, only give the statements for the method body. And output the raw data.");
@@ -264,7 +268,7 @@ async function sendToLlama(prompt: string, method: string, context: string) {
 }
 */
 
-async function sendToAI(prompt: string, context: string, methodName: string) : Promise<string> {
+export async function sendToAI(prompt: string, context: string, methodName: string) : Promise<string> {
   const config = vscode.workspace.getConfiguration("aiServer");
   const serverType = config.get<string>("type", "llama");
   const llmModel = config.get<string>("model", "qwen2.5-coder:7b");
