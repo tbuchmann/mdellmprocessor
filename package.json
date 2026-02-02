@@ -56,6 +56,11 @@
             "chat"
           ],
           "description": "Choose between generate API and chat API for Ollama"
+        },
+        "aiServer.ollamaApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Optional API key for the Ollama server (if required for authentication)"
         }
       }
     },
@@ -70,7 +75,7 @@
     "commands": [
       {
         "command": "mdellm.addToDiagram",
-        "title": "Add to Class Diagram",
+        "title": "Add to Model",
         "icon": "$(graph)"
       },
       {

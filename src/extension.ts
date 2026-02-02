@@ -13,8 +13,8 @@ export function activate(context: vscode.ExtensionContext) {
         const fullMethodText = doc.getText(methodRange);
 
         // 1. Extract code between markers
-        const startMarker = "//generated start";
-        const endMarker = "//generated end";
+        const startMarker = "// generated start";
+        const endMarker = "// generated end";
         const startIndex = fullMethodText.indexOf(startMarker);
         const endIndex = fullMethodText.indexOf(endMarker);
 
@@ -53,14 +53,13 @@ export function activate(context: vscode.ExtensionContext) {
 
         // 4. Insert into DSL via Regex
         // searches the class, then the method, then the opening {
-        // uses multiline regex to find the structure
-        // (Google Gemini helped a lot)
+        // then finds the spec "..." and inserts after it
         const newImpl = `impl java << ${extractedCode} >>`;
         
-        // simple approach: look for the operation within the class
-        // this regex retrieves the opening { of the operation
+        // regex to find: method_name(...) { ... spec "..." }
+        // we need to insert after the spec "..." line
         const escapedMethodName = methodName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const methodRegex = new RegExp(`(${escapedMethodName}\\s*\\([^)]*\\)\\s*(?::\\s*\\w+)?\\s*\\{)`, 'm');
+        const methodRegex = new RegExp(`(${escapedMethodName}\\s*\\([^)]*\\)\\s*(?::\\s*\\w+)?\\s*\\{\\s*spec\\s+"[^"]*")`, 'm');
 
         const match = methodRegex.exec(cdiagText);
 
@@ -121,7 +120,7 @@ export function activate(context: vscode.ExtensionContext) {
             // 2. looks for our marker in the document
             for (let i = 0; i < document.lineCount; i++) {
                 const line = document.lineAt(i);
-                if (line.text.includes("//generated start")) {
+                if (line.text.includes("// generated start")) {
                     
                     // 3. finds method containing this marker
                     const methodSymbol = findEnclosingMethod(symbols, line.range);

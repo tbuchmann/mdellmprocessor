@@ -7,6 +7,31 @@ import { Ollama } from 'ollama';
 
 //const LLAMA_SERVER_URL = "http://127.0.0.1:8080/completion";
 
+/**
+ * Extracts Java code from LLM response, handling markdown code blocks
+ */
+function extractJavaCode(response: string): string {
+    // Check if response contains markdown code blocks
+    const codeBlockMatch = response.match(/```(?:java)?\n([\s\S]*?)```/m);
+    if (codeBlockMatch && codeBlockMatch[1]) {
+        return codeBlockMatch[1].trim();
+    }
+    
+    // If no markdown block, return the response as-is (trimmed)
+    return response.trim();
+}
+
+/**
+ * Normalizes whitespace in generated code
+ */
+function normalizeCodeWhitespace(code: string): string {
+    return code
+        .split('\n')
+        .map(line => line.trimEnd())
+        .join('\n')
+        .trim();
+}
+
 export async function processJavaFile(filePath: string, folderPath: string) {
     let content = fs.readFileSync(filePath, 'utf8');
 
@@ -30,23 +55,31 @@ export async function processJavaFile(filePath: string, folderPath: string) {
 
         // Find the next '//generated start' after the JavaDoc
         const javadocEndIndex = match.index + match[0].length;
-        const startGenIndex = content.indexOf('//generated start', javadocEndIndex);
+        const startGenIndex = content.indexOf('// generated start', javadocEndIndex);
 
-        // Extract the method name before the '{'
-        const methodRegex = /([a-zA-Z0-9_<>\[\]]+)\s+([a-zA-Z0-9_]+)\s*\([^)]*\)\s*\{/g;
-        let methodMatch;
+        // Extract the complete method signature (including generics, annotations, etc.)
+        // Search for the next method declaration after the javadoc
+        const remainingContent = content.substring(javadocEndIndex);
+        const methodRegex = /(?:public|private|protected)?\s+(?:static\s+)?(?:final\s+)?(?:synchronized\s+)?(?:<[^>]+>\s+)?([a-zA-Z0-9_<>\[\].,?]+)\s+([a-zA-Z0-9_]+)\s*\(([^)]*)\)\s*(?:throws[^{]+)?\s*\{/;
+        const methodMatch = remainingContent.match(methodRegex);
         let methodName = "UnknownMethod";
 
-        while ((methodMatch = methodRegex.exec(content)) !== null) {
-            if (methodMatch.index > javadocEndIndex) {
-                methodName = methodMatch[2];
-                break;
-            }
+        if (methodMatch) {
+            methodName = methodMatch[2];
+            console.log(`[LLMProcessor] Found method: ${methodName}`);
+        } else {
+            console.warn(`[LLMProcessor] Could not extract method name from javadoc at index ${javadocEndIndex}`);
         }
 
-        if (startGenIndex !== -1) {
-            const endGenIndex = content.indexOf('//generated end', startGenIndex);
-            if (endGenIndex !== -1) {
+        // Check if markers exist
+        if (startGenIndex === -1) {
+            console.warn(`[LLMProcessor] // generated start marker not found after javadoc for method ${methodName}`);
+        } else {
+            const endGenIndex = content.indexOf('// generated end', startGenIndex);
+            if (endGenIndex === -1) {
+                console.warn(`[LLMProcessor] // generated end marker not found for method ${methodName}`);
+            } else {
+                console.log(`[LLMProcessor] Found markers for method ${methodName}`);
                 matches.push({
                     promptContent,
                     javadocEndIndex,
@@ -91,26 +124,46 @@ export async function processJavaFile(filePath: string, folderPath: string) {
                 progress.report({ message, increment: (100 / totalMethods) * i });
 
                 // Wait for the AI response
-                const llmGen = await sendToAI(matchItem.promptContent, contextText, matchItem.methodName);
+                const llmResponse = await sendToAI(matchItem.promptContent, contextText, matchItem.methodName);
 
-                if (llmGen) {
-                    // Re-read content to account for previous insertions
-                    content = fs.readFileSync(filePath, 'utf8');
-
-                    // TODO: check if the answer contains ```java ... ``` and extract only the code part
-                    // For now, we assume the response is raw code
-                    
-                    // Recalculate indices based on updated content
-                    const updatedStartGenIndex = content.indexOf('//generated start', matchItem.javadocEndIndex);
-                    if (updatedStartGenIndex !== -1) {
-                        const updatedEndGenIndex = content.indexOf('//generated end', updatedStartGenIndex);
-                        if (updatedEndGenIndex !== -1) {
-                            content = content.slice(0, updatedStartGenIndex + '//generated start'.length) +
-                                    "\n" + llmGen + "\n" +
-                                    content.slice(updatedEndGenIndex);
-                            fs.writeFileSync(filePath, content, 'utf8');
+                if (llmResponse) {
+                    try {
+                        // Extract Java code from response (handles markdown blocks)
+                        const extractedCode = extractJavaCode(llmResponse);
+                        
+                        // Normalize whitespace
+                        const normalizedCode = normalizeCodeWhitespace(extractedCode);
+                        
+                        if (!normalizedCode) {
+                            throw new Error(`Empty code generated for method ${matchItem.methodName}`);
                         }
+                        
+                        // Re-read content to account for previous insertions
+                        content = fs.readFileSync(filePath, 'utf8');
+                        
+                        // Recalculate indices based on updated content
+                        const updatedStartGenIndex = content.indexOf('// generated start', matchItem.javadocEndIndex);
+                        if (updatedStartGenIndex !== -1) {
+                            const updatedEndGenIndex = content.indexOf('// generated end', updatedStartGenIndex);
+                            if (updatedEndGenIndex !== -1) {
+                                content = content.slice(0, updatedStartGenIndex + '// generated start'.length) +
+                                        "\n" + normalizedCode + "\n" +
+                                        content.slice(updatedEndGenIndex);
+                                fs.writeFileSync(filePath, content, 'utf8');
+                                console.log(`[LLMProcessor] Successfully inserted code for method: ${matchItem.methodName}`);
+                            } else {
+                                throw new Error(`Generated end marker not found for method ${matchItem.methodName}`);
+                            }
+                        } else {
+                            throw new Error(`Generated start marker not found for method ${matchItem.methodName}`);
+                        }
+                    } catch (error: any) {
+                        const errorMsg = `Error processing LLM response for method ${matchItem.methodName}: ${error.message}`;
+                        console.error(`[LLMProcessor] ${errorMsg}`);
+                        vscode.window.showWarningMessage(errorMsg);
                     }
+                } else {
+                    console.warn(`[LLMProcessor] Empty response from LLM for method: ${matchItem.methodName}`);
                 }
 
                 // Update final progress
@@ -121,7 +174,8 @@ export async function processJavaFile(filePath: string, folderPath: string) {
         }
     );
 
-    vscode.window.showInformationMessage(`Successfully processed ${totalMethods} method(s) in ${filePath}`);
+    console.log(`[LLMProcessor] Successfully processed ${totalMethods} method(s) in ${filePath}`);
+    vscode.window.showInformationMessage(`Successfully processed ${totalMethods} method(s)`);
 }
 /*
 function sendPrompt(prompt: string, method: string): string {
@@ -234,6 +288,7 @@ async function sendToAI(prompt: string, context: string, methodName: string) : P
 
 async function sendToLlama(prompt: string, context: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
   try {
+      console.log(`[LLMProcessor] Sending request to Llama.cpp for method: ${methodName}`);
       const response = await axios.post(endpoint, {
           prompt: prompt,
           context: context,
@@ -241,19 +296,33 @@ async function sendToLlama(prompt: string, context: string, methodName: string, 
           max_tokens: 256
       });
 
-      vscode.window.showInformationMessage(`Llama Response for ${methodName}: ${response.data.text}`);
-      return response.data.text;
+      const responseText = response.data.text || response.data.content || '';
+      if (!responseText) {
+          throw new Error('Empty response from Llama.cpp');
+      }
+      
+      console.log(`[LLMProcessor] Received response from Llama.cpp (${responseText.length} chars)`);
+      return responseText;
   } catch (error: any) {
-      handleRequestError(error, "Llama.cpp");
+      handleRequestError(error, "Llama.cpp", methodName);
       return "";
   }
 }
 
 async function sendToOllama(prompt: string, context: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
   try {
+      console.log(`[LLMProcessor] Sending request to Ollama for method: ${methodName}`);
       // Initialize Ollama client - endpoint should be the base URL (e.g., http://localhost:11434)
       const baseUrl = endpoint.replace('/api/generate', ''); // Remove the endpoint path if present
-      const ollama = new Ollama({ host: baseUrl });
+      const config = vscode.workspace.getConfiguration("aiServer");
+      const apiKey = config.get<string>("ollamaApiKey", "");
+      
+      const ollamaOptions: any = { host: baseUrl };
+      if (apiKey) {
+          ollamaOptions.headers = { 'Authorization': `Bearer ${apiKey}` };
+      }
+      
+      const ollama = new Ollama(ollamaOptions);
       
       const systemPrompt = getSystemPrompt();
       const userPrompt = `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines. Raw data only, no markdown.`;
@@ -267,19 +336,32 @@ async function sendToOllama(prompt: string, context: string, methodName: string,
       });
       
       const generatedText = response.response || '';
-      vscode.window.showInformationMessage(`Ollama Response for ${methodName}: ${generatedText}`);
+      if (!generatedText) {
+          throw new Error('Empty response from Ollama');
+      }
+      
+      console.log(`[LLMProcessor] Received response from Ollama (${generatedText.length} chars)`);
       return generatedText;
   } catch (error: any) {
-      handleRequestError(error, "Ollama");
+      handleRequestError(error, "Ollama", methodName);
       return "";
   }
 }
 
 async function sendToOllamaChat(prompt: string, context: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
   try {
+      console.log(`[LLMProcessor] Sending chat request to Ollama for method: ${methodName}`);
       // Initialize Ollama client - endpoint should be the base URL (e.g., http://localhost:11434)
       const baseUrl = endpoint.replace('/api/generate', ''); // Remove the endpoint path if present
-      const ollama = new Ollama({ host: baseUrl });
+      const config = vscode.workspace.getConfiguration("aiServer");
+      const apiKey = config.get<string>("ollamaApiKey", "");
+      
+      const ollamaOptions: any = { host: baseUrl };
+      if (apiKey) {
+          ollamaOptions.headers = { 'Authorization': `Bearer ${apiKey}` };
+      }
+      
+      const ollama = new Ollama(ollamaOptions);
       
       const systemPrompt = getSystemPrompt();
       
@@ -300,22 +382,37 @@ async function sendToOllamaChat(prompt: string, context: string, methodName: str
       });
       
       const generatedText = response.message?.content || '';
-      vscode.window.showInformationMessage(`Ollama Response for ${methodName}: ${generatedText}`);
+      if (!generatedText) {
+          throw new Error('Empty response from Ollama Chat');
+      }
+      
+      console.log(`[LLMProcessor] Received chat response from Ollama (${generatedText.length} chars)`);
       return generatedText;
   } catch (error: any) {
-      handleRequestError(error, "Ollama");
+      handleRequestError(error, "Ollama Chat", methodName);
       return "";
   }
 }
 
-function handleRequestError(error: any, serverName: string) {
+function handleRequestError(error: any, serverName: string, methodName?: string) {
+  let errorMsg = '';
+  
   if (error.response) {
-      vscode.window.showErrorMessage(`${serverName} API Error: ${error.response.status} - ${error.response.data}`);
+      errorMsg = `${serverName} API Error: ${error.response.status} - ${error.response.statusText}`;
+      console.error(`[LLMProcessor] ${errorMsg}`);
+      if (error.response.data) {
+          console.error(`[LLMProcessor] Response data:`, error.response.data);
+      }
   } else if (error.request) {
-      vscode.window.showErrorMessage(`${serverName} API is unreachable. Check the server URL.`);
+      errorMsg = `${serverName} is unreachable. Check the server URL and ensure it's running.`;
+      console.error(`[LLMProcessor] ${errorMsg}. Endpoint: ${error.config?.url}`);
   } else {
-      vscode.window.showErrorMessage(`Error sending request to ${serverName}: ${error.message}`);
+      errorMsg = `Error sending request to ${serverName}: ${error.message}`;
+      console.error(`[LLMProcessor] ${errorMsg}`);
   }
+  
+  const fullMessage = methodName ? `${errorMsg} (Method: ${methodName})` : errorMsg;
+  vscode.window.showErrorMessage(fullMessage);
 }
 
 /*
