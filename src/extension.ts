@@ -127,7 +127,7 @@ export function activate(context: vscode.ExtensionContext) {
 
                     if (methodSymbol) {
                         lenses.push(new vscode.CodeLens(methodSymbol.range, {
-                            title: "✨ Add to class diagram",
+                            title: "✨ Add to model",
                             command: "myExtension.addToDiagram",
                             arguments: [methodSymbol.range] // pass the whole method range
                         }));
@@ -150,7 +150,7 @@ function findEnclosingMethod(symbols: vscode.DocumentSymbol[], range: vscode.Ran
     for (const symbol of symbols) {
         if (symbol.range.contains(range)) {
             // if the symbol is a method, return it
-            if (symbol.kind === vscode.SymbolKind.Method) {
+            if (symbol.kind === vscode.SymbolKind.Method || symbol.kind === vscode.SymbolKind.Constructor) {
                 return symbol;
             }
             // continue searching in the children elements otherwise (i.e. within a class)
@@ -166,7 +166,7 @@ function findEnclosingMethod(symbols: vscode.DocumentSymbol[], range: vscode.Ran
 // helper for searching symbols
 function findSymbolAtRange(symbols: vscode.DocumentSymbol[], range: vscode.Range): vscode.DocumentSymbol | undefined {
     for (const s of symbols) {
-        if (s.range.contains(range) && s.kind === vscode.SymbolKind.Method) return s;
+        if (s.range.contains(range) && (s.kind === vscode.SymbolKind.Method || s.kind === vscode.SymbolKind.Constructor) ) return s;
         if (s.children) {
             const child = findSymbolAtRange(s.children, range);
             if (child) return child;
