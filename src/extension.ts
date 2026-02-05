@@ -93,6 +93,9 @@ export function activate(context: vscode.ExtensionContext) {
 	const command = vscode.commands.registerCommand(
 		"mdellm.processJavaFolder",
 		async (uri: vscode.Uri) => {
+			// Start timing
+			console.time("[DEBUG] Total processing time");
+			
 			if (!uri || !fs.lstatSync(uri.fsPath).isDirectory()) {
 				vscode.window.showErrorMessage("Please select a valid folder.");
 				return;
@@ -113,6 +116,9 @@ export function activate(context: vscode.ExtensionContext) {
 				await processJavaFile(filePath, uri.fsPath);
 			}
 			vscode.window.showInformationMessage("Processed all Java files successfully.");
+			
+			// Stop timing and log elapsed time
+			console.timeEnd("[DEBUG] Total processing time");
 		}
 	  );
 
