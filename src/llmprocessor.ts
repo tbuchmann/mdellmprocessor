@@ -34,6 +34,7 @@ export function normalizeCodeWhitespace(code: string): string {
 
 export async function processJavaFile(filePath: string, folderPath: string) {
     let content = fs.readFileSync(filePath, 'utf8');
+    let className: string = filePath.split('/').pop()?.replace('.java', '') ?? "";
 
     const javadocRegex = /\/\*\*[\s\S]*?@prompt\s+([\s\S]*?)\*\//g;
     let match;
@@ -124,7 +125,7 @@ export async function processJavaFile(filePath: string, folderPath: string) {
                 progress.report({ message, increment: (100 / totalMethods) * i });
 
                 // Wait for the AI response
-                const llmResponse = await sendToAI(matchItem.promptContent, contextText, matchItem.methodName);
+                const llmResponse = await sendToAI(matchItem.promptContent, contextText, className, matchItem.methodName);
 
                 if (llmResponse) {
                     try {
@@ -238,11 +239,15 @@ function sendPrompt(prompt: string, method: string): string {
 */
 function getAllJavaFilesContent(folderPath: string): string {
     const files = fs.readdirSync(folderPath).filter(file => file.endsWith(".java"));
-    return files.map(file => fs.readFileSync(path.join(folderPath, file), 'utf8')).join("\n\n");
+    return files.map(file => "### `" + file + "`\n```java\n" + fs.readFileSync(path.join(folderPath, file), 'utf8') + "```").join("\n\n");
 }
 
 export function getAllJavaFilesContentExported(folderPath: string): string {
     return getAllJavaFilesContent(folderPath);
+}
+
+function getUserPrompt(className: string, methodName: string, specification: string, context: string): string {
+    return `##Method to implement:\n\`${methodName}\` of class \`${className}\`\n\n##Specification:\n"${specification}"\n\n##Context\n\n${context}`;
 }
 
 function getSystemPrompt(): string {
@@ -268,21 +273,21 @@ async function sendToLlama(prompt: string, method: string, context: string) {
 }
 */
 
-export async function sendToAI(prompt: string, context: string, methodName: string) : Promise<string> {
+export async function sendToAI(prompt: string, context: string, className: string, methodName: string) : Promise<string> {
   const config = vscode.workspace.getConfiguration("aiServer");
   const serverType = config.get<string>("type", "llama");
   const llmModel = config.get<string>("model", "qwen2.5-coder:7b");
   
   if (serverType === "llama") {
-      return await sendToLlama(prompt, context, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"), llmModel);
+      return await sendToLlama(prompt, context, className, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"), llmModel);
   } else if (serverType === "ollama") {
       const apiApproach = config.get<string>("ollamaApiApproach", "generate");
       const endpoint = config.get<string>("ollamaEndpoint", "http://localhost:11434/api/generate");
       
       if (apiApproach === "chat") {
-          return await sendToOllamaChat(prompt, context, methodName, endpoint, llmModel);
+          return await sendToOllamaChat(prompt, context, className, methodName, endpoint, llmModel);
       } else {
-          return await sendToOllama(prompt, context, methodName, endpoint, llmModel);
+          return await sendToOllama(prompt, context, className, methodName, endpoint, llmModel);
       }
   } else {
       vscode.window.showErrorMessage("Invalid AI server type selected.");
@@ -290,11 +295,11 @@ export async function sendToAI(prompt: string, context: string, methodName: stri
   }
 }
 
-async function sendToLlama(prompt: string, context: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
+async function sendToLlama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
   try {
       console.log(`[LLMProcessor] Sending request to Llama.cpp for method: ${methodName}`);
       const response = await axios.post(endpoint, {
-          prompt: prompt,
+          prompt: `**Method to implement**: ${methodName} of class ${className}\n\n**Specification**: ${prompt}\n\n**Context**:\n${context}`,
           context: context,
           temperature: 0.7,
           max_tokens: 256
@@ -313,7 +318,7 @@ async function sendToLlama(prompt: string, context: string, methodName: string, 
   }
 }
 
-async function sendToOllama(prompt: string, context: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
+async function sendToOllama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
   try {
       console.log(`[LLMProcessor] Sending request to Ollama for method: ${methodName}`);
       // Initialize Ollama client - endpoint should be the base URL (e.g., http://localhost:11434)
@@ -329,8 +334,8 @@ async function sendToOllama(prompt: string, context: string, methodName: string,
       const ollama = new Ollama(ollamaOptions);
       
       const systemPrompt = getSystemPrompt();
-      const userPrompt = `Context:\n${context}\n\nQuestion:\n${prompt}\n\nSource code only, without any explanations and only the body of the method. Don't repeat the Java source code. Please give me only the generated lines. Raw data only, no markdown.`;
-      
+      const userPrompt = getUserPrompt(className, methodName, prompt, context);
+
       // Use Ollama library to generate response
       const response = await ollama.generate({
           model: llmmodel,
@@ -338,13 +343,17 @@ async function sendToOllama(prompt: string, context: string, methodName: string,
           system: systemPrompt,
           stream: false,
       });
-      
+        
       const generatedText = response.response || '';
       if (!generatedText) {
           throw new Error('Empty response from Ollama');
       }
       
       console.log(`[LLMProcessor] Received response from Ollama (${generatedText.length} chars)`);
+      const logResponse = response;
+      logResponse.response = "";
+      logResponse.context = [];
+      console.log(JSON.stringify(logResponse));
       return generatedText;
   } catch (error: any) {
       handleRequestError(error, "Ollama", methodName);
@@ -352,7 +361,7 @@ async function sendToOllama(prompt: string, context: string, methodName: string,
   }
 }
 
-async function sendToOllamaChat(prompt: string, context: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
+async function sendToOllamaChat(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
   try {
       console.log(`[LLMProcessor] Sending chat request to Ollama for method: ${methodName}`);
       // Initialize Ollama client - endpoint should be the base URL (e.g., http://localhost:11434)
@@ -379,7 +388,7 @@ async function sendToOllamaChat(prompt: string, context: string, methodName: str
               },
               {
                   role: 'user',
-                  content: `Here is the codebase context:\n\n${context}\n\nImplement the method: ${methodName}\n\nRequirements:\n${prompt}\n\nProvide ONLY the method body code without explanations.`
+                  content: `**Method to implement**: ${methodName} of class ${className}\n\n**Specification**: ${prompt}\n\n**Context**:\n${context}`
               }
           ],
           stream: false,

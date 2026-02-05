@@ -129,6 +129,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 		const doc = editor.document;
 		const fullMethodText = doc.getText(methodRange);
+        const className = doc.uri.toString().split('/').pop()?.replace('.java', '') ?? "";
 
 		// 1. Extract prompt from JavaDoc
 		const promptMatch = fullMethodText.match(/\/\*\*[\s\S]*?@prompt\s+([\s\S]*?)\*\//);
@@ -178,7 +179,7 @@ export function activate(context: vscode.ExtensionContext) {
 			},
 			async (progress) => {
 				const contextText = getAllJavaFilesContentExported(folderPath);
-				const llmResponse = await sendToAILLM(promptContent, contextText, methodName);
+				const llmResponse = await sendToAILLM(promptContent, contextText, className, methodName);
 
 				if (llmResponse) {
 					try {
