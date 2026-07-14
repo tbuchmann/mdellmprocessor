@@ -11,6 +11,7 @@
   ],
   "activationEvents": [
     "onCommand:mdellm.processJavaFolder",
+    "onCommand:mdellm.processJavaFolderSpringBoot",
     "onLanguage:java"
   ],
   "main": "./out/extension.js",
@@ -24,9 +25,15 @@
           "default": "llama",
           "enum": [
             "llama",
-            "ollama"
+            "ollama",
+            "openai"
           ],
-          "description": "Choose between Llama.cpp and Ollama"
+          "enumDescriptions": [
+            "Llama.cpp server",
+            "Ollama native API",
+            "OpenAI-compatible API (e.g. Ollama's /v1, vLLM, etc.)"
+          ],
+          "description": "Choose between Llama.cpp, Ollama, or an OpenAI-compatible API"
         },
         "aiServer.llamaEndpoint": {
           "type": "string",
@@ -37,6 +44,16 @@
           "type": "string",
           "default": "http://localhost:11434/api/generate",
           "description": "The endpoint URL for the Ollama server"
+        },
+        "aiServer.openaiEndpoint": {
+          "type": "string",
+          "default": "http://localhost:11434/v1/chat/completions",
+          "description": "The endpoint URL for the OpenAI-compatible API (e.g. http://host:port/v1/chat/completions)"
+        },
+        "aiServer.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for the OpenAI-compatible API (sent as Bearer token)"
         },
         "aiServer.model": {
           "type": "string",
@@ -61,6 +78,38 @@
           "type": "string",
           "default": "",
           "description": "Optional API key for the Ollama server (if required for authentication)"
+        },
+        "aiServer.temperature": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Temperature for the LLM response generation"
+        },
+        "aiServer.maxTokens": {
+          "type": "number",
+          "default": 1024,
+          "minimum": 1,
+          "description": "Maximum number of tokens to generate in the LLM response"
+        },
+        "aiServer.topP": {
+          "type": "number",
+          "default": 0.9,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Top-p (nucleus) sampling for the LLM response generation"
+        },
+        "aiServer.contextMaxChars": {
+          "type": "number",
+          "default": 50000,
+          "minimum": 0,
+          "description": "Maximum total characters of context files sent to the LLM. Set to 0 for no limit."
+        },
+        "aiServer.retryAttempts": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "description": "Number of retry attempts on transient LLM failures"
         }
       }
     },
@@ -68,6 +117,10 @@
       "explorer/context": [
         {
           "command": "mdellm.processJavaFolder",
+          "group": "navigation"
+        },
+        {
+          "command": "mdellm.processJavaFolderSpringBoot",
           "group": "navigation"
         }
       ]
@@ -81,6 +134,10 @@
       {
         "command": "mdellm.processJavaFolder",
         "title": "Process Java Folder"
+      },
+      {
+        "command": "mdellm.processJavaFolderSpringBoot",
+        "title": "Process Spring Boot Folder"
       }
     ]
   },
@@ -94,7 +151,7 @@
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
-    "@types/node": "20.x",
+    "@types/node": "^26.1.1",
     "@types/vscode": "^1.97.0",
     "@typescript-eslint/eslint-plugin": "^8.22.0",
     "@typescript-eslint/parser": "^8.22.0",

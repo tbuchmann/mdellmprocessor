@@ -2,23 +2,93 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import axios from 'axios';
-import { start } from 'repl';
 import { Ollama } from 'ollama';
+import { addMissingImports } from './imports';
+
+let extensionRootPath: string | undefined;
+
+/**
+ * Sets the extension root path so default resources (e.g. systemprompt.txt) can be located.
+ */
+export function setExtensionRootPath(rootPath: string): void {
+    extensionRootPath = rootPath;
+}
 
 //const LLAMA_SERVER_URL = "http://127.0.0.1:8080/completion";
 
 /**
- * Extracts Java code from LLM response, handling markdown code blocks
+ * Extracts Java code from LLM response, handling:
+ * - Markdown fenced code blocks (```java ... ```)
+ * - Indented code blocks (4+ spaces or tab)
+ * - Non-indented code mixed with prose (paragraph-based detection)
+ * - Multiple code blocks (returns the last/most complete one)
+ * - Pure code responses with no prose
  */
 export function extractJavaCode(response: string): string {
-    // Check if response contains markdown code blocks
-    const codeBlockMatch = response.match(/```(?:java)?\n([\s\S]*?)```/m);
-    if (codeBlockMatch && codeBlockMatch[1]) {
-        return codeBlockMatch[1].trim();
+    const trimmed = response.trim();
+
+    // 1. Try fenced code blocks (```java or ```)
+    const fencedMatches = [...trimmed.matchAll(/```(?:java)?\n([\s\S]*?)```/gm)];
+    if (fencedMatches.length > 0) {
+        // Return the last fenced block (usually the corrected/final version)
+        return fencedMatches[fencedMatches.length - 1][1].trim();
     }
-    
-    // If no markdown block, return the response as-is (trimmed)
-    return response.trim();
+
+    // 2. Split into paragraphs (separated by blank lines) and find code blocks
+    const paragraphs = trimmed.split(/\n\s*\n/);
+
+    // Check if a paragraph looks like Java code
+    const isCodeParagraph = (text: string): boolean => {
+        const lines = text.split('\n').filter(l => l.trim().length > 0);
+        if (lines.length === 0) {
+            return false;
+        }
+
+        // Prose indicators — if any line matches, it's not code
+        const proseIndicators: RegExp[] = [
+            /^(I|The|This|Here|Note|First|Then|After|In order|To |For |If |You |Your|However|Let|Sorry|Unfortunately|Based on|Now|So|But|And|Or)\b/i,
+            /^(I[rm]|I[dl]|Let[st]|Let us|Please|Sorry|Unfortunately)\b/i,
+            /\b(should|would|could|might|basically|essentially|in other words|notice that|I notice|incorrect|missing|assumption)\b/i,
+        ];
+        for (const line of lines) {
+            if (proseIndicators.some(regex => regex.test(line.trim()))) {
+                return false;
+            }
+        }
+
+        // Code indicators — at least one line must look like Java
+        const codeIndicators = [
+            /\b(return|if|for|while|var|new|this|super|throw|try|catch|final|switch|case|break|continue)\b/,
+            /\b(public|private|protected|static)\b/,
+            /\w+\.\w+\(/, // method call
+            /\b(int|long|double|float|boolean|String|List|Map|Set|Optional)\b/,
+            /^[^A-Za-z]*\./, // starts with . (method chain)
+        ];
+        const hasCode = codeIndicators.some(regex => regex.test(text));
+        if (!hasCode) {
+            return false;
+        }
+
+        // Check for balanced braces (allow off-by-one for incomplete blocks)
+        const openBraces = (text.match(/{/g) || []).length;
+        const closeBraces = (text.match(/}/g) || []).length;
+        if (Math.abs(openBraces - closeBraces) > 1) {
+            return false;
+        }
+
+        return true;
+    };
+
+    // Find all paragraphs that look like code
+    const codeParagraphs = paragraphs.filter(isCodeParagraph);
+
+    if (codeParagraphs.length > 0) {
+        // Return the last code paragraph (usually the final/corrected version)
+        return codeParagraphs[codeParagraphs.length - 1].trim();
+    }
+
+    // 3. No code paragraphs found — return as-is (might be pure code without indentation)
+    return trimmed;
 }
 
 /**
@@ -32,9 +102,9 @@ export function normalizeCodeWhitespace(code: string): string {
         .trim();
 }
 
-export async function processJavaFile(filePath: string, folderPath: string) {
+export async function processJavaFile(filePath: string, folderPath: string, mode: SystemPromptMode = 'default') {
     let content = fs.readFileSync(filePath, 'utf8');
-    let className: string = filePath.split('/').pop()?.replace('.java', '') ?? "";
+    let className: string = path.basename(filePath, '.java');
 
     const javadocRegex = /\/\*\*[\s\S]*?@prompt\s+([\s\S]*?)\*\//g;
     let match;
@@ -101,7 +171,7 @@ export async function processJavaFile(filePath: string, folderPath: string) {
     }
 
     // Read all Java files in the folder as context (do this once)
-    let contextText = getAllJavaFilesContent(folderPath);
+    let contextText = getAllJavaFilesContent(folderPath, filePath);
 
     // Show progress while processing
     await vscode.window.withProgress(
@@ -111,6 +181,8 @@ export async function processJavaFile(filePath: string, folderPath: string) {
             cancellable: true,
         },
         async (progress, token) => {
+            const failures: Array<{ methodName: string; error: string }> = [];
+
             for (let i = 0; i < matches.length; i++) {
                 // Check if cancellation was requested
                 if (token.isCancellationRequested) {
@@ -124,47 +196,57 @@ export async function processJavaFile(filePath: string, folderPath: string) {
                 const message = `Processing method: ${matchItem.methodName} (${i + 1}/${totalMethods})`;
                 progress.report({ message, increment: (100 / totalMethods) * i });
 
-                // Wait for the AI response
-                const llmResponse = await sendToAI(matchItem.promptContent, contextText, className, matchItem.methodName);
+                try {
+                    // Wait for the AI response
+                    const llmResponse = await sendToAI(matchItem.promptContent, contextText, className, matchItem.methodName, mode);
 
-                if (llmResponse) {
-                    try {
-                        // Extract Java code from response (handles markdown blocks)
-                        const extractedCode = extractJavaCode(llmResponse);
-                        
-                        // Normalize whitespace
-                        const normalizedCode = normalizeCodeWhitespace(extractedCode);
-                        
-                        if (!normalizedCode) {
-                            throw new Error(`Empty code generated for method ${matchItem.methodName}`);
-                        }
-                        
-                        // Re-read content to account for previous insertions
-                        content = fs.readFileSync(filePath, 'utf8');
-                        
-                        // Recalculate indices based on updated content
-                        const updatedStartGenIndex = content.indexOf('// generated start', matchItem.javadocEndIndex);
-                        if (updatedStartGenIndex !== -1) {
-                            const updatedEndGenIndex = content.indexOf('// generated end', updatedStartGenIndex);
-                            if (updatedEndGenIndex !== -1) {
-                                content = content.slice(0, updatedStartGenIndex + '// generated start'.length) +
-                                        "\n" + normalizedCode + "\n" +
-                                        content.slice(updatedEndGenIndex);
-                                fs.writeFileSync(filePath, content, 'utf8');
-                                console.log(`[LLMProcessor] Successfully inserted code for method: ${matchItem.methodName}`);
-                            } else {
-                                throw new Error(`Generated end marker not found for method ${matchItem.methodName}`);
-                            }
-                        } else {
-                            throw new Error(`Generated start marker not found for method ${matchItem.methodName}`);
-                        }
-                    } catch (error: any) {
-                        const errorMsg = `Error processing LLM response for method ${matchItem.methodName}: ${error.message}`;
-                        console.error(`[LLMProcessor] ${errorMsg}`);
-                        vscode.window.showWarningMessage(errorMsg);
+                    if (!llmResponse || !llmResponse.trim()) {
+                        throw new Error(`Empty response from LLM`);
                     }
-                } else {
-                    console.warn(`[LLMProcessor] Empty response from LLM for method: ${matchItem.methodName}`);
+
+                    // Extract Java code from response (handles markdown blocks)
+                    const extractedCode = extractJavaCode(llmResponse);
+                    
+                    // Normalize whitespace
+                    const normalizedCode = normalizeCodeWhitespace(extractedCode);
+                    
+                    if (!normalizedCode) {
+                        throw new Error(`Empty code generated for method ${matchItem.methodName}`);
+                    }
+                    
+                    // Re-read content to account for previous insertions
+                    content = fs.readFileSync(filePath, 'utf8');
+                    
+                    // Recalculate indices based on updated content
+                    const updatedStartGenIndex = content.indexOf('// generated start', matchItem.javadocEndIndex);
+                    if (updatedStartGenIndex === -1) {
+                        throw new Error(`Generated start marker not found for method ${matchItem.methodName}`);
+                    }
+                    const updatedEndGenIndex = content.indexOf('// generated end', updatedStartGenIndex);
+                    if (updatedEndGenIndex === -1) {
+                        throw new Error(`Generated end marker not found for method ${matchItem.methodName}`);
+                    }
+
+                    content = content.slice(0, updatedStartGenIndex + '// generated start'.length) +
+                            "\n" + normalizedCode + "\n" +
+                            content.slice(updatedEndGenIndex);
+                    fs.writeFileSync(filePath, content, 'utf8');
+                    console.log(`[LLMProcessor] Successfully inserted code for method: ${matchItem.methodName}`);
+
+                    // Postprocessing: add missing imports
+                    try {
+                        const added = addMissingImports(filePath, normalizedCode, folderPath);
+                        if (added.length > 0) {
+                            // Re-read content since the file was modified
+                            content = fs.readFileSync(filePath, 'utf8');
+                        }
+                    } catch (e) {
+                        console.warn(`[LLMProcessor] Failed to add missing imports: ${e}`);
+                    }
+                } catch (error: any) {
+                    const errorMsg = `${error.message}`;
+                    console.error(`[LLMProcessor] Error for method ${matchItem.methodName}: ${errorMsg}`);
+                    failures.push({ methodName: matchItem.methodName, error: errorMsg });
                 }
 
                 // Update final progress
@@ -172,11 +254,21 @@ export async function processJavaFile(filePath: string, folderPath: string) {
                     progress.report({ message: `Completed: ${matchItem.methodName}`, increment: 100 });
                 }
             }
+
+            // Summary
+            const successCount = totalMethods - failures.length;
+            if (failures.length === 0) {
+                vscode.window.showInformationMessage(`Successfully processed ${successCount}/${totalMethods} method(s)`);
+            } else {
+                const failedList = failures.map(f => `  • ${f.methodName}: ${f.error}`).join('\n');
+                vscode.window.showWarningMessage(
+                    `Processed ${successCount}/${totalMethods} methods. ${failures.length} failed:\n${failedList}`
+                );
+            }
         }
     );
 
-    console.log(`[LLMProcessor] Successfully processed ${totalMethods} method(s) in ${filePath.split('/').pop()}`);
-    vscode.window.showInformationMessage(`Successfully processed ${totalMethods} method(s)`);
+    console.log(`[LLMProcessor] Processed ${totalMethods} method(s) in ${path.basename(filePath)}`);
 }
 /*
 function sendPrompt(prompt: string, method: string): string {
@@ -237,22 +329,233 @@ function sendPrompt(prompt: string, method: string): string {
     return promptResult;
 }
 */
-function getAllJavaFilesContent(folderPath: string): string {
-    const files = fs.readdirSync(folderPath).filter(file => file.endsWith(".java"));
-    return files.map(file => "### `" + file + "`\n```java\n" + fs.readFileSync(path.join(folderPath, file), 'utf8') + "```").join("\n\n");
+function getAllJavaFilesContent(folderPath: string, targetFilePath?: string): string {
+    const config = vscode.workspace.getConfiguration("aiServer");
+    const maxChars = config.get<number>("contextMaxChars", 50000);
+
+    const javaFiles: string[] = [];
+    const collectJavaFiles = (dir: string) => {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                collectJavaFiles(fullPath);
+            } else if (entry.name.endsWith(".java")) {
+                javaFiles.push(fullPath);
+            }
+        }
+    };
+    collectJavaFiles(folderPath);
+
+    // Sort files by relevance to the target file
+    const sortedFiles = targetFilePath
+        ? sortFilesByRelevance(javaFiles, targetFilePath)
+        : javaFiles;
+
+    const parts: string[] = [];
+    let totalChars = 0;
+    let truncated = false;
+
+    for (const filePath of sortedFiles) {
+        const relativeName = path.relative(folderPath, filePath);
+        const content = fs.readFileSync(filePath, 'utf8');
+        const part = "### `" + relativeName + "`\n```java\n" + content + "```";
+
+        if (maxChars > 0 && totalChars + part.length > maxChars) {
+            truncated = true;
+            break;
+        }
+
+        parts.push(part);
+        totalChars += part.length;
+    }
+
+    if (truncated) {
+        console.warn(`[LLMProcessor] Context truncated at ${totalChars} chars (${parts.length}/${javaFiles.length} files) due to contextMaxChars=${maxChars}`);
+        vscode.window.showWarningMessage(`Context truncated: ${parts.length}/${javaFiles.length} files included (${totalChars} chars). Increase 'aiServer.contextMaxChars' to include more.`);
+    } else {
+        console.log(`[LLMProcessor] Context: ${parts.length}/${javaFiles.length} files, ${totalChars} chars`);
+    }
+
+    return parts.join("\n\n");
 }
 
-export function getAllJavaFilesContentExported(folderPath: string): string {
-    return getAllJavaFilesContent(folderPath);
+/**
+ * Sorts Java files by relevance to the target file.
+ *
+ * Uses a two-tier approach:
+ *   1. Parses the import statements in the target file and maps them to file paths.
+ *   2. Falls back to name-based heuristics for files not covered by imports.
+ *
+ * Priority:
+ *   0. The target file itself
+ *   1. Direct interface (e.g. DeliveryAddressService for DeliveryAddressServiceImpl)
+ *   2. Files explicitly imported by the target file
+ *   3. Repositories matching the concept
+ *   4. Domain entities matching the concept
+ *   5. DTOs
+ *   6. Other files in the same package
+ *   7. Everything else
+ */
+function sortFilesByRelevance(files: string[], targetFilePath: string): string[] {
+    const targetName = path.basename(targetFilePath, '.java');
+    // Strip "Impl" if present to get the base name (e.g. DeliveryAddressServiceImpl -> DeliveryAddressService)
+    const baseName = targetName.endsWith('Impl') ? targetName.slice(0, -4) : targetName;
+    // Extract the core concept (e.g. DeliveryAddressService -> DeliveryAddress)
+    const conceptMatch = baseName.match(/^(.+?)(?:Service|Controller|Repository)?$/);
+    const concept = conceptMatch ? conceptMatch[1] : baseName;
+
+    // Parse imports from the target file
+    const importedFiles = parseImportedFiles(targetFilePath, files);
+
+    const targetUri = targetFilePath;
+
+    const score = (filePath: string): number => {
+        const fileName = path.basename(filePath, '.java');
+
+        // The target file itself
+        if (filePath === targetUri || fileName === targetName) {
+            return 0;
+        }
+
+        // Direct interface (e.g. DeliveryAddressService for DeliveryAddressServiceImpl)
+        if (fileName === baseName || fileName === baseName + 'Impl') {
+            return 1;
+        }
+
+        // Files explicitly imported by the target file
+        if (importedFiles.has(filePath)) {
+            return 2;
+        }
+
+        // Repositories matching the concept
+        if (fileName.includes('Repository') && fileName.includes(concept)) {
+            return 3;
+        }
+
+        // Domain entities matching the concept
+        if (fileName.includes(concept) && !fileName.includes('Impl')) {
+            return 4;
+        }
+
+        // DTOs
+        if (fileName.toLowerCase().includes('dto') || fileName.includes('Request') || fileName.includes('Response') || fileName.includes('Snapshot')) {
+            return 5;
+        }
+
+        // Other repositories
+        if (fileName.includes('Repository')) {
+            return 6;
+        }
+
+        // Other files in the same package
+        const targetDir = path.dirname(targetFilePath);
+        const fileDir = path.dirname(filePath);
+        if (targetDir === fileDir) {
+            return 7;
+        }
+
+        // Everything else
+        return 8;
+    };
+
+    return [...files].sort((a, b) => {
+        const scoreA = score(a);
+        const scoreB = score(b);
+        if (scoreA !== scoreB) {
+            return scoreA - scoreB;
+        }
+        return path.basename(a).localeCompare(path.basename(b));
+    });
+}
+
+/**
+ * Parses the import statements from a Java file and maps them to actual file paths
+ * in the provided list of files.
+ *
+ * E.g. `import dev.moproco.icedlatte.dto.DeliveryAddressSnapshot;`
+ * maps to `.../dto/DeliveryAddressSnapshot.java`
+ */
+function parseImportedFiles(targetFilePath: string, allFiles: string[]): Set<string> {
+    const result = new Set<string>();
+
+    let content: string;
+    try {
+        content = fs.readFileSync(targetFilePath, 'utf8');
+    } catch {
+        return result;
+    }
+
+    // Match: import <package>.<ClassName>;
+    const importRegex = /import\s+(?:static\s+)?[\w.]+\.(\w+);/g;
+    const importedClassNames = new Set<string>();
+    let match: RegExpExecArray | null;
+    while ((match = importRegex.exec(content)) !== null) {
+        importedClassNames.add(match[1]);
+    }
+
+    if (importedClassNames.size === 0) {
+        return result;
+    }
+
+    // Map class names to file paths
+    for (const filePath of allFiles) {
+        const fileName = path.basename(filePath, '.java');
+        if (importedClassNames.has(fileName)) {
+            result.add(filePath);
+        }
+    }
+
+    return result;
+}
+
+export function getAllJavaFilesContentExported(folderPath: string, targetFilePath?: string): string {
+    return getAllJavaFilesContent(folderPath, targetFilePath);
 }
 
 function getUserPrompt(className: string, methodName: string, specification: string, context: string): string {
     return `##Method to implement:\n\`${methodName}\` of class \`${className}\`\n\n##Specification:\n"${specification}"\n\n##Context\n\n${context}`;
 }
 
-function getSystemPrompt(): string {
+function getGenerationOptions(): { temperature: number; maxTokens: number; topP: number } {
   const config = vscode.workspace.getConfiguration("aiServer");
-  return config.get<string>("systemPrompt", "You are an experienced Java programmer. I will ask you questions on how to implement the body of certain Java methods. In your answer, only give the statements for the method body. And output the raw data.");
+  return {
+      temperature: config.get<number>("temperature", 0.7),
+      maxTokens: config.get<number>("maxTokens", 1024),
+      topP: config.get<number>("topP", 0.9),
+  };
+}
+
+export type SystemPromptMode = 'default' | 'springboot';
+
+function getSystemPrompt(mode: SystemPromptMode = 'default'): string {
+  // For springboot mode, prefer the bundled Spring Boot prompt
+  if (mode === 'springboot') {
+      if (extensionRootPath) {
+          try {
+              const filePath = path.join(extensionRootPath, 'systemprompt-springboot.txt');
+              return fs.readFileSync(filePath, 'utf8');
+          } catch (e) {
+              console.warn(`[LLMProcessor] Could not read systemprompt-springboot.txt: ${e}`);
+          }
+      }
+  }
+
+  const config = vscode.workspace.getConfiguration("aiServer");
+  const configured = config.get<string>("systemPrompt", "");
+  if (configured && configured.trim().length > 0) {
+      return configured;
+  }
+  // Fall back to the bundled systemprompt.txt
+  if (extensionRootPath) {
+      try {
+          const filePath = path.join(extensionRootPath, 'systemprompt.txt');
+          return fs.readFileSync(filePath, 'utf8');
+      } catch (e) {
+          console.warn(`[LLMProcessor] Could not read systemprompt.txt: ${e}`);
+      }
+  }
+  return "You are an experienced Java programmer. I will ask you questions on how to implement the body of certain Java methods. In your answer, only give the statements for the method body. And output the raw data.";
 }
 
 /*
@@ -273,52 +576,192 @@ async function sendToLlama(prompt: string, method: string, context: string) {
 }
 */
 
-export async function sendToAI(prompt: string, context: string, className: string, methodName: string) : Promise<string> {
+/**
+ * Checks if the LLM response looks like valid Java code (not explanations/garbage).
+ * Returns true if the response appears to be code.
+ */
+function isResponseValidJava(response: string): boolean {
+    const trimmed = response.trim();
+    if (trimmed.length === 0) {
+        return false;
+    }
+
+    // Extract code block if present
+    const code = extractJavaCode(trimmed);
+
+    // If the extracted code is empty, it's garbage
+    if (code.trim().length === 0) {
+        return false;
+    }
+
+    const lines = code.split('\n');
+    const nonEmptyLines = lines.filter(l => l.trim().length > 0);
+
+    if (nonEmptyLines.length === 0) {
+        return false;
+    }
+
+    // Check for common prose patterns that would indicate the extraction failed
+    // to separate code from prose
+    const proseIndicators: RegExp[] = [
+        /^(I|The|This|Here|Note|First|Then|After|In order|To |For |If |You |Your|However|Let|Sorry|Unfortunately|Based on|Now|So|But|And|Or)\b/i,
+        /^(I[rm]|I[dl]|Let[st]|Let us|Please|Sorry|Unfortunately)\b/i,
+        /\b(should|would|could|might|basically|essentially|in other words|notice that|see that|I notice)\b/i,
+        /\b(incorrect|wrong|issue|problem|error|missing|assumption)\b/i,
+    ];
+
+    let proseLineCount = 0;
+    for (const line of nonEmptyLines) {
+        if (proseIndicators.some(regex => regex.test(line.trim()))) {
+            proseLineCount++;
+        }
+    }
+
+    // If more than 30% of lines look like prose, it's garbage
+    if (nonEmptyLines.length > 0 && proseLineCount / nonEmptyLines.length > 0.3) {
+        return false;
+    }
+
+    // Check for at least some Java-like syntax
+    const codeIndicators = [
+        /\b(return|if|for|while|var|new|this|super|throw|try|catch|final|switch|case|break|continue)\b/,
+        /[;{}()]/,
+        /\b(public|private|protected|static)\b/,
+        /\w+\.\w+\(/, // method call
+        /\b(int|long|double|float|boolean|String|List|Map|Set|Optional)\b/,
+    ];
+
+    const hasCode = codeIndicators.some(regex => regex.test(code));
+    if (!hasCode) {
+        return false;
+    }
+
+    // Check for balanced braces (simple check)
+    const openBraces = (code.match(/{/g) || []).length;
+    const closeBraces = (code.match(/}/g) || []).length;
+    if (Math.abs(openBraces - closeBraces) > 1) {
+        // Unbalanced braces suggest truncated or malformed code
+        return false;
+    }
+
+    // Check for fragmented code — starts mid-statement
+    const firstNonEmptyLine = nonEmptyLines[0].trim();
+    const fragmentedIndicators = [
+        /^\./,          // starts with . (method chain without receiver)
+        /^\)/,          // starts with ) (unbalanced parenthesis)
+        /^,/,            // starts with , (argument continuation)
+        /^&&/,           // starts with && (boolean continuation)
+        /^\|\|/,         // starts with || (boolean continuation)
+        /^:/,            // starts with : (ternary or label)
+    ];
+    if (fragmentedIndicators.some(regex => regex.test(firstNonEmptyLine))) {
+        // Code starts mid-statement — likely missing the first line(s)
+        return false;
+    }
+
+    // Check for unbalanced parentheses
+    const openParens = (code.match(/\(/g) || []).length;
+    const closeParens = (code.match(/\)/g) || []).length;
+    if (Math.abs(openParens - closeParens) > 1) {
+        return false;
+    }
+
+    return true;
+}
+
+export async function sendToAI(prompt: string, context: string, className: string, methodName: string, mode: SystemPromptMode = 'default') : Promise<string> {
   const config = vscode.workspace.getConfiguration("aiServer");
   const serverType = config.get<string>("type", "llama");
   const llmModel = config.get<string>("model", "qwen2.5-coder:7b");
-  
-  if (serverType === "llama") {
-      return await sendToLlama(prompt, context, className, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"), llmModel);
-  } else if (serverType === "ollama") {
-      const apiApproach = config.get<string>("ollamaApiApproach", "generate");
-      const endpoint = config.get<string>("ollamaEndpoint", "http://localhost:11434/api/generate");
-      
-      if (apiApproach === "chat") {
-          return await sendToOllamaChat(prompt, context, className, methodName, endpoint, llmModel);
-      } else {
-          return await sendToOllama(prompt, context, className, methodName, endpoint, llmModel);
+  const retryAttempts = config.get<number>("retryAttempts", 2);
+
+  let lastError: any = null;
+
+  for (let attempt = 0; attempt <= retryAttempts; attempt++) {
+      if (attempt > 0) {
+          const delayMs = Math.pow(2, attempt) * 1000;
+          console.log(`[LLMProcessor] Retry ${attempt}/${retryAttempts} for method ${methodName} after ${delayMs}ms`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
       }
-  } else {
-      vscode.window.showErrorMessage("Invalid AI server type selected.");
-      return "";
+
+      try {
+          let result: string;
+          if (serverType === "llama") {
+              result = await sendToLlama(prompt, context, className, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"), llmModel, mode);
+          } else if (serverType === "ollama") {
+              const apiApproach = config.get<string>("ollamaApiApproach", "generate");
+              const endpoint = config.get<string>("ollamaEndpoint", "http://localhost:11434/api/generate");
+
+              if (apiApproach === "chat") {
+                  result = await sendToOllamaChat(prompt, context, className, methodName, endpoint, llmModel, mode);
+              } else {
+                  result = await sendToOllama(prompt, context, className, methodName, endpoint, llmModel, mode);
+              }
+          } else if (serverType === "openai") {
+              const endpoint = config.get<string>("openaiEndpoint", "http://localhost:11434/v1/chat/completions");
+              const apiKey = config.get<string>("openaiApiKey", "");
+              result = await sendToOpenAI(prompt, context, className, methodName, endpoint, llmModel, apiKey, mode);
+          } else {
+              vscode.window.showErrorMessage("Invalid AI server type selected.");
+              return "";
+          }
+
+          if (result && result.trim().length > 0) {
+              // Validate that the response looks like code, not prose
+              if (isResponseValidJava(result)) {
+                  return result;
+              }
+              console.warn(`[LLMProcessor] Response for method ${methodName} does not look like valid Java code (attempt ${attempt + 1}/${retryAttempts + 1})`);
+              lastError = new Error(`Invalid response (not Java code) from ${serverType}`);
+              // Continue to retry
+          } else {
+              lastError = new Error(`Empty response from ${serverType}`);
+          }
+      } catch (error: any) {
+          lastError = error;
+          // Don't retry on 4xx client errors
+          if (error?.response?.status >= 400 && error?.response?.status < 500) {
+              break;
+          }
+      }
   }
+
+  if (lastError) {
+      const serverName = serverType === "llama" ? "Llama.cpp" : (serverType === "openai" ? "OpenAI" : "Ollama");
+      handleRequestError(lastError, serverName, methodName);
+  }
+  return "";
 }
 
-async function sendToLlama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
+async function sendToLlama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, mode: SystemPromptMode = 'default') : Promise<string> {
   try {
       console.log(`[LLMProcessor] Sending request to Llama.cpp for method: ${methodName}`);
+      const systemPrompt = getSystemPrompt(mode);
+      const userPrompt = getUserPrompt(className, methodName, prompt, context);
+      const opts = getGenerationOptions();
       const response = await axios.post(endpoint, {
-          prompt: `**Method to implement**: ${methodName} of class ${className}\n\n**Specification**: ${prompt}\n\n**Context**:\n${context}`,
-          context: context,
-          temperature: 0.7,
-          max_tokens: 256
+          prompt: userPrompt,
+          system_prompt: systemPrompt,
+          temperature: opts.temperature,
+          top_p: opts.topP,
+          max_tokens: opts.maxTokens,
+          stop: ["\n}\n"]
       });
 
       const responseText = response.data.text || response.data.content || '';
       if (!responseText) {
           throw new Error('Empty response from Llama.cpp');
       }
-      
+
       console.log(`[LLMProcessor] Received response from Llama.cpp (${responseText.length} chars)`);
       return responseText;
   } catch (error: any) {
-      handleRequestError(error, "Llama.cpp", methodName);
-      return "";
+      console.error(`[LLMProcessor] Llama.cpp error for method ${methodName}: ${error.message}`);
+      throw error;
   }
 }
 
-async function sendToOllama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
+async function sendToOllama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, mode: SystemPromptMode = 'default') : Promise<string> {
   try {
       console.log(`[LLMProcessor] Sending request to Ollama for method: ${methodName}`);
       // Initialize Ollama client - endpoint should be the base URL (e.g., http://localhost:11434)
@@ -333,8 +776,9 @@ async function sendToOllama(prompt: string, context: string, className: string, 
       
       const ollama = new Ollama(ollamaOptions);
       
-      const systemPrompt = getSystemPrompt();
+      const systemPrompt = getSystemPrompt(mode);
       const userPrompt = getUserPrompt(className, methodName, prompt, context);
+      const opts = getGenerationOptions();
 
       // Use Ollama library to generate response
       const response = await ollama.generate({
@@ -342,6 +786,11 @@ async function sendToOllama(prompt: string, context: string, className: string, 
           prompt: userPrompt,
           system: systemPrompt,
           stream: false,
+          options: {
+              temperature: opts.temperature,
+              top_p: opts.topP,
+              num_predict: opts.maxTokens,
+          },
       });
         
       const generatedText = response.response || '';
@@ -350,18 +799,20 @@ async function sendToOllama(prompt: string, context: string, className: string, 
       }
       
       console.log(`[LLMProcessor] Received response from Ollama (${generatedText.length} chars)`);
-      const logResponse = response;
+      const logResponse = response as any;
       logResponse.response = "";
-      logResponse.context = [];
+      if (Array.isArray(logResponse.context)) {
+          logResponse.context = [];
+      }
       console.log(JSON.stringify(logResponse));
       return generatedText;
   } catch (error: any) {
-      handleRequestError(error, "Ollama", methodName);
-      return "";
+      console.error(`[LLMProcessor] Ollama error for method ${methodName}: ${error.message}`);
+      throw error;
   }
 }
 
-async function sendToOllamaChat(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string) : Promise<string> {
+async function sendToOllamaChat(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, mode: SystemPromptMode = 'default') : Promise<string> {
   try {
       console.log(`[LLMProcessor] Sending chat request to Ollama for method: ${methodName}`);
       // Initialize Ollama client - endpoint should be the base URL (e.g., http://localhost:11434)
@@ -376,8 +827,9 @@ async function sendToOllamaChat(prompt: string, context: string, className: stri
       
       const ollama = new Ollama(ollamaOptions);
       
-      const systemPrompt = getSystemPrompt();
-      
+      const systemPrompt = getSystemPrompt(mode);
+      const opts = getGenerationOptions();
+
       // Use Ollama chat API with structured messages
       const response = await ollama.chat({
           model: llmmodel,
@@ -392,6 +844,11 @@ async function sendToOllamaChat(prompt: string, context: string, className: stri
               }
           ],
           stream: false,
+          options: {
+              temperature: opts.temperature,
+              top_p: opts.topP,
+              num_predict: opts.maxTokens,
+          },
       });
       
       const generatedText = response.message?.content || '';
@@ -402,8 +859,53 @@ async function sendToOllamaChat(prompt: string, context: string, className: stri
       console.log(`[LLMProcessor] Received chat response from Ollama (${generatedText.length} chars)`);
       return generatedText;
   } catch (error: any) {
-      handleRequestError(error, "Ollama Chat", methodName);
-      return "";
+      console.error(`[LLMProcessor] Ollama Chat error for method ${methodName}: ${error.message}`);
+      throw error;
+  }
+}
+
+async function sendToOpenAI(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, apiKey: string, mode: SystemPromptMode = 'default') : Promise<string> {
+  try {
+      console.log(`[LLMProcessor] Sending request to OpenAI-compatible API for method: ${methodName}`);
+      const systemPrompt = getSystemPrompt(mode);
+      const userPrompt = getUserPrompt(className, methodName, prompt, context);
+      const opts = getGenerationOptions();
+
+      const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+      };
+      if (apiKey) {
+          headers['Authorization'] = `Bearer ${apiKey}`;
+      }
+
+      const response = await axios.post(endpoint, {
+          model: llmmodel,
+          messages: [
+              {
+                  role: 'system',
+                  content: systemPrompt
+              },
+              {
+                  role: 'user',
+                  content: userPrompt
+              }
+          ],
+          temperature: opts.temperature,
+          top_p: opts.topP,
+          max_tokens: opts.maxTokens,
+          stream: false,
+      }, { headers });
+
+      const generatedText = response.data?.choices?.[0]?.message?.content || '';
+      if (!generatedText) {
+          throw new Error('Empty response from OpenAI-compatible API');
+      }
+
+      console.log(`[LLMProcessor] Received response from OpenAI-compatible API (${generatedText.length} chars)`);
+      return generatedText;
+  } catch (error: any) {
+      console.error(`[LLMProcessor] OpenAI API error for method ${methodName}: ${error.message}`);
+      throw error;
   }
 }
 
