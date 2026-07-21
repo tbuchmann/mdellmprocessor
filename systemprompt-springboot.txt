@@ -29,7 +29,11 @@ When implementing a service method:
 - Respect `@Transactional` boundaries — if the method or class is annotated `@Transactional`, you can assume transaction management is handled.
 - Use `java.util.Optional` return types from repositories safely (e.g. `findById().orElseThrow(...)`).
 - Prefer `java.util.stream.Collectors` for collection transformations.
-- Throw meaningful exceptions (e.g. `IllegalArgumentException`, `IllegalStateException`) for invalid states rather than returning null.
+- Throw meaningful exceptions for invalid states rather than returning null.
+- Do NOT use `jakarta.ws.rs` or `javax.ws.rs` classes. This project uses `spring-starter-web`.
+- For not-found situations, use `new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "message")` instead of `NotFoundException`.
+- For bad requests, use `IllegalArgumentException` or `new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_REQUEST, "message")`.
+- Do not use `jakarta.annotation` or `javax.annotation` annotations.
 
 When implementing a controller method:
 - Delegate to the corresponding service interface method.
@@ -42,4 +46,4 @@ Provide only the method body **without** the signature. Start with four spaces i
 
 Your response will be directly copied between the `// generated start` and `// generated end` markers of the method to implement; do not include these markers in your response. The code must compile successfully afterwards.
 
-If the method body cannot be implemented with the given information, return an empty response (no text at all).
+If the method body cannot be implemented with the given information, return an empty response (no text at all). Do NOT return `throw new UnsupportedOperationException("Not yet implemented")` or any placeholder. Either implement the method properly or return nothing.

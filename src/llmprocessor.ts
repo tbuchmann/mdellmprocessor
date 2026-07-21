@@ -4,6 +4,7 @@ import * as path from 'path';
 import axios from 'axios';
 import { Ollama } from 'ollama';
 import { addMissingImports } from './imports';
+import { getLogger, resetLogger, extractOllamaUsage, extractOpenAIUsage, type TokenUsage } from './logger';
 
 let extensionRootPath: string | undefined;
 
@@ -170,8 +171,9 @@ export async function processJavaFile(filePath: string, folderPath: string, mode
         return;
     }
 
-    // Read all Java files in the folder as context (do this once)
-    let contextText = getAllJavaFilesContent(folderPath, filePath);
+    // Read all Java files in the folder as context (do this once per method, not per file)
+    // The context is built per-method to keep the context window focused and avoid
+    // exhausting the LLM's attention with irrelevant files.
 
     // Show progress while processing
     await vscode.window.withProgress(
@@ -191,12 +193,16 @@ export async function processJavaFile(filePath: string, folderPath: string, mode
                 }
 
                 const matchItem = matches[i];
-                
+
                 // Update progress
                 const message = `Processing method: ${matchItem.methodName} (${i + 1}/${totalMethods})`;
                 progress.report({ message, increment: (100 / totalMethods) * i });
 
                 try {
+                    // Build per-method context with the method's class as target
+                    const batchMaxChars = vscode.workspace.getConfiguration("aiServer").get<number>("contextMaxCharsBatch", 0);
+                    const contextText = getAllJavaFilesContent(folderPath, filePath, batchMaxChars > 0 ? batchMaxChars : undefined);
+
                     // Wait for the AI response
                     const llmResponse = await sendToAI(matchItem.promptContent, contextText, className, matchItem.methodName, mode);
 
@@ -329,9 +335,9 @@ function sendPrompt(prompt: string, method: string): string {
     return promptResult;
 }
 */
-function getAllJavaFilesContent(folderPath: string, targetFilePath?: string): string {
+function getAllJavaFilesContent(folderPath: string, targetFilePath?: string, maxCharsOverride?: number): string {
     const config = vscode.workspace.getConfiguration("aiServer");
-    const maxChars = config.get<number>("contextMaxChars", 50000);
+    const maxChars = maxCharsOverride ?? config.get<number>("contextMaxChars", 50000);
 
     const javaFiles: string[] = [];
     const collectJavaFiles = (dir: string) => {
@@ -509,8 +515,8 @@ function parseImportedFiles(targetFilePath: string, allFiles: string[]): Set<str
     return result;
 }
 
-export function getAllJavaFilesContentExported(folderPath: string, targetFilePath?: string): string {
-    return getAllJavaFilesContent(folderPath, targetFilePath);
+export function getAllJavaFilesContentExported(folderPath: string, targetFilePath?: string, maxCharsOverride?: number): string {
+    return getAllJavaFilesContent(folderPath, targetFilePath, maxCharsOverride);
 }
 
 function getUserPrompt(className: string, methodName: string, specification: string, context: string): string {
@@ -527,6 +533,11 @@ function getGenerationOptions(): { temperature: number; maxTokens: number; topP:
 }
 
 export type SystemPromptMode = 'default' | 'springboot';
+
+interface LLMResponse {
+    text: string;
+    usage?: TokenUsage;
+}
 
 function getSystemPrompt(mode: SystemPromptMode = 'default'): string {
   // For springboot mode, prefer the bundled Spring Boot prompt
@@ -636,9 +647,10 @@ function isResponseValidJava(response: string): boolean {
         return false;
     }
 
-    // Check for balanced braces (simple check)
-    const openBraces = (code.match(/{/g) || []).length;
-    const closeBraces = (code.match(/}/g) || []).length;
+    // Check for balanced braces (simple check, ignoring string literals)
+    const codeWithoutStrings = code.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+    const openBraces = (codeWithoutStrings.match(/{/g) || []).length;
+    const closeBraces = (codeWithoutStrings.match(/}/g) || []).length;
     if (Math.abs(openBraces - closeBraces) > 1) {
         // Unbalanced braces suggest truncated or malformed code
         return false;
@@ -659,9 +671,9 @@ function isResponseValidJava(response: string): boolean {
         return false;
     }
 
-    // Check for unbalanced parentheses
-    const openParens = (code.match(/\(/g) || []).length;
-    const closeParens = (code.match(/\)/g) || []).length;
+    // Check for unbalanced parentheses (ignoring string literals)
+    const openParens = (codeWithoutStrings.match(/\(/g) || []).length;
+    const closeParens = (codeWithoutStrings.match(/\)/g) || []).length;
     if (Math.abs(openParens - closeParens) > 1) {
         return false;
     }
@@ -674,8 +686,11 @@ export async function sendToAI(prompt: string, context: string, className: strin
   const serverType = config.get<string>("type", "llama");
   const llmModel = config.get<string>("model", "qwen2.5-coder:7b");
   const retryAttempts = config.get<number>("retryAttempts", 2);
+  const logger = getLogger();
 
   let lastError: any = null;
+  let lastInvalidResponse: string | null = null;
+  let lastInvalidUsage: TokenUsage | undefined;
 
   for (let attempt = 0; attempt <= retryAttempts; attempt++) {
       if (attempt > 0) {
@@ -685,7 +700,7 @@ export async function sendToAI(prompt: string, context: string, className: strin
       }
 
       try {
-          let result: string;
+          let result: LLMResponse;
           if (serverType === "llama") {
               result = await sendToLlama(prompt, context, className, methodName, config.get<string>("llamaEndpoint", "http://localhost:8080/completion"), llmModel, mode);
           } else if (serverType === "ollama") {
@@ -706,14 +721,42 @@ export async function sendToAI(prompt: string, context: string, className: strin
               return "";
           }
 
-          if (result && result.trim().length > 0) {
-              // Validate that the response looks like code, not prose
-              if (isResponseValidJava(result)) {
-                  return result;
+          const text = result.text;
+          const usage = result.usage;
+
+          if (text && text.trim().length > 0) {
+              // Check if the LLM returned the default placeholder body
+              if (/throw\s+new\s+UnsupportedOperationException\s*\(\s*["']Not\s+yet\s+implemented["']\s*\)/.test(text)) {
+                  console.warn(`[LLMProcessor] Response for method ${methodName} is the default placeholder (UnsupportedOperationException) (attempt ${attempt + 1}/${retryAttempts + 1})`);
+                  lastError = new Error(`Default placeholder response from ${serverType}`);
+                  lastInvalidResponse = text;
+                  lastInvalidUsage = usage;
+                  // Continue to retry
               }
-              console.warn(`[LLMProcessor] Response for method ${methodName} does not look like valid Java code (attempt ${attempt + 1}/${retryAttempts + 1})`);
-              lastError = new Error(`Invalid response (not Java code) from ${serverType}`);
-              // Continue to retry
+              // Validate that the response looks like code, not prose
+              else if (isResponseValidJava(text)) {
+                  logger.log({
+                      timestamp: new Date().toISOString(),
+                      className,
+                      methodName,
+                      mode,
+                      prompt: getUserPrompt(className, methodName, prompt, context),
+                      response: text,
+                      status: 'success',
+                      usage,
+                      attempt: attempt + 1,
+                  });
+                  if (usage) {
+                      console.log(`[LLMProcessor] Tokens for ${methodName}: prompt=${usage.promptTokens}, completion=${usage.completionTokens}, total=${usage.totalTokens}`);
+                  }
+                  return text;
+              } else {
+                  console.warn(`[LLMProcessor] Response for method ${methodName} does not look like valid Java code (attempt ${attempt + 1}/${retryAttempts + 1})`);
+                  lastError = new Error(`Invalid response (not Java code) from ${serverType}`);
+                  lastInvalidResponse = text;
+                  lastInvalidUsage = usage;
+                  // Continue to retry
+              }
           } else {
               lastError = new Error(`Empty response from ${serverType}`);
           }
@@ -729,11 +772,63 @@ export async function sendToAI(prompt: string, context: string, className: strin
   if (lastError) {
       const serverName = serverType === "llama" ? "Llama.cpp" : (serverType === "openai" ? "OpenAI" : "Ollama");
       handleRequestError(lastError, serverName, methodName);
+
+      // Last resort: if we have an invalid response that contains some code, return it
+      if (lastInvalidResponse) {
+          // Don't return the placeholder
+          if (/throw\s+new\s+UnsupportedOperationException\s*\(\s*["']Not\s+yet\s+implemented["']\s*\)/.test(lastInvalidResponse)) {
+              console.warn(`[LLMProcessor] Not returning placeholder for method ${methodName}`);
+              logger.log({
+                  timestamp: new Date().toISOString(),
+                  className,
+                  methodName,
+                  mode,
+                  prompt: getUserPrompt(className, methodName, prompt, context),
+                  response: lastInvalidResponse,
+                  status: 'placeholder',
+                  error: lastError.message,
+                  usage: lastInvalidUsage,
+                  attempt: retryAttempts + 1,
+              });
+              return "";
+              }
+          const extractedCode = extractJavaCode(lastInvalidResponse);
+          if (extractedCode && extractedCode.trim().length > 0) {
+              console.warn(`[LLMProcessor] Returning last invalid response for method ${methodName} after all retries failed`);
+              vscode.window.showWarningMessage(`Method ${methodName}: Using best-effort code after validation failed. Please review.`);
+              logger.log({
+                  timestamp: new Date().toISOString(),
+                  className,
+                  methodName,
+                  mode,
+                  prompt: getUserPrompt(className, methodName, prompt, context),
+                  response: lastInvalidResponse,
+                  status: 'invalid',
+                  error: lastError.message,
+                  usage: lastInvalidUsage,
+                  attempt: retryAttempts + 1,
+              });
+              return lastInvalidResponse;
+          }
+      } else {
+          // No response at all
+          logger.log({
+              timestamp: new Date().toISOString(),
+              className,
+              methodName,
+              mode,
+              prompt: getUserPrompt(className, methodName, prompt, context),
+              response: '',
+              status: 'failed',
+              error: lastError.message,
+              attempt: retryAttempts + 1,
+          });
+      }
   }
   return "";
 }
 
-async function sendToLlama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, mode: SystemPromptMode = 'default') : Promise<string> {
+async function sendToLlama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, mode: SystemPromptMode = 'default') : Promise<LLMResponse> {
   try {
       console.log(`[LLMProcessor] Sending request to Llama.cpp for method: ${methodName}`);
       const systemPrompt = getSystemPrompt(mode);
@@ -754,28 +849,28 @@ async function sendToLlama(prompt: string, context: string, className: string, m
       }
 
       console.log(`[LLMProcessor] Received response from Llama.cpp (${responseText.length} chars)`);
-      return responseText;
+      return { text: responseText };
   } catch (error: any) {
       console.error(`[LLMProcessor] Llama.cpp error for method ${methodName}: ${error.message}`);
       throw error;
   }
 }
 
-async function sendToOllama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, mode: SystemPromptMode = 'default') : Promise<string> {
+async function sendToOllama(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, mode: SystemPromptMode = 'default') : Promise<LLMResponse> {
   try {
       console.log(`[LLMProcessor] Sending request to Ollama for method: ${methodName}`);
       // Initialize Ollama client - endpoint should be the base URL (e.g., http://localhost:11434)
       const baseUrl = endpoint.replace('/api/generate', ''); // Remove the endpoint path if present
       const config = vscode.workspace.getConfiguration("aiServer");
       const apiKey = config.get<string>("ollamaApiKey", "");
-      
+
       const ollamaOptions: any = { host: baseUrl };
       if (apiKey) {
           ollamaOptions.headers = { 'Authorization': `Bearer ${apiKey}` };
       }
-      
+
       const ollama = new Ollama(ollamaOptions);
-      
+
       const systemPrompt = getSystemPrompt(mode);
       const userPrompt = getUserPrompt(className, methodName, prompt, context);
       const opts = getGenerationOptions();
@@ -792,41 +887,42 @@ async function sendToOllama(prompt: string, context: string, className: string, 
               num_predict: opts.maxTokens,
           },
       });
-        
+
       const generatedText = response.response || '';
       if (!generatedText) {
           throw new Error('Empty response from Ollama');
       }
-      
+
       console.log(`[LLMProcessor] Received response from Ollama (${generatedText.length} chars)`);
+      const usage = extractOllamaUsage(response);
       const logResponse = response as any;
       logResponse.response = "";
       if (Array.isArray(logResponse.context)) {
           logResponse.context = [];
       }
       console.log(JSON.stringify(logResponse));
-      return generatedText;
+      return { text: generatedText, usage };
   } catch (error: any) {
       console.error(`[LLMProcessor] Ollama error for method ${methodName}: ${error.message}`);
       throw error;
   }
 }
 
-async function sendToOllamaChat(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, mode: SystemPromptMode = 'default') : Promise<string> {
+async function sendToOllamaChat(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, mode: SystemPromptMode = 'default') : Promise<LLMResponse> {
   try {
       console.log(`[LLMProcessor] Sending chat request to Ollama for method: ${methodName}`);
       // Initialize Ollama client - endpoint should be the base URL (e.g., http://localhost:11434)
       const baseUrl = endpoint.replace('/api/generate', ''); // Remove the endpoint path if present
       const config = vscode.workspace.getConfiguration("aiServer");
       const apiKey = config.get<string>("ollamaApiKey", "");
-      
+
       const ollamaOptions: any = { host: baseUrl };
       if (apiKey) {
           ollamaOptions.headers = { 'Authorization': `Bearer ${apiKey}` };
       }
-      
+
       const ollama = new Ollama(ollamaOptions);
-      
+
       const systemPrompt = getSystemPrompt(mode);
       const opts = getGenerationOptions();
 
@@ -850,21 +946,22 @@ async function sendToOllamaChat(prompt: string, context: string, className: stri
               num_predict: opts.maxTokens,
           },
       });
-      
+
       const generatedText = response.message?.content || '';
       if (!generatedText) {
           throw new Error('Empty response from Ollama Chat');
       }
-      
+
       console.log(`[LLMProcessor] Received chat response from Ollama (${generatedText.length} chars)`);
-      return generatedText;
+      const usage = extractOllamaUsage(response);
+      return { text: generatedText, usage };
   } catch (error: any) {
       console.error(`[LLMProcessor] Ollama Chat error for method ${methodName}: ${error.message}`);
       throw error;
   }
 }
 
-async function sendToOpenAI(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, apiKey: string, mode: SystemPromptMode = 'default') : Promise<string> {
+async function sendToOpenAI(prompt: string, context: string, className: string, methodName: string, endpoint: string, llmmodel: string, apiKey: string, mode: SystemPromptMode = 'default') : Promise<LLMResponse> {
   try {
       console.log(`[LLMProcessor] Sending request to OpenAI-compatible API for method: ${methodName}`);
       const systemPrompt = getSystemPrompt(mode);
@@ -902,7 +999,8 @@ async function sendToOpenAI(prompt: string, context: string, className: string, 
       }
 
       console.log(`[LLMProcessor] Received response from OpenAI-compatible API (${generatedText.length} chars)`);
-      return generatedText;
+      const usage = extractOpenAIUsage(response);
+      return { text: generatedText, usage };
   } catch (error: any) {
       console.error(`[LLMProcessor] OpenAI API error for method ${methodName}: ${error.message}`);
       throw error;

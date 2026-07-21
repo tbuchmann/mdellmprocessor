@@ -20,4 +20,4 @@ Provide only the method body **without** the signature. Start with four spaces i
 
 Your response will be directly copied between the `// generated start` and `// generated end` markers of the method to implement; do not include these markers in your response. The code must compile successfully afterwards.
 
-If the method body cannot be implemented with the given information, return an empty response (no text at all).
+If the method body cannot be implemented with the given information, return an empty response (no text at all). Do NOT return `throw new UnsupportedOperationException("Not yet implemented")` or any placeholder. Either implement the method properly or return nothing.

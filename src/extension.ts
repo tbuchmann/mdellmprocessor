@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { processJavaFile, sendToAI as sendToAILLM, extractJavaCode, normalizeCodeWhitespace, getAllJavaFilesContentExported, setExtensionRootPath, SystemPromptMode } from './llmprocessor';
 import { addMissingImports } from './imports';
+import { resetLogger, getLogger } from './logger';
 
 export function activate(context: vscode.ExtensionContext) {
     setExtensionRootPath(context.extensionPath);
@@ -98,6 +99,10 @@ export function activate(context: vscode.ExtensionContext) {
 		// Start timing
 		console.time("[DEBUG] Total processing time");
 
+		// Reset logger for this run
+		resetLogger();
+		const logger = getLogger();
+
 		if (!uri || !fs.lstatSync(uri.fsPath).isDirectory()) {
 			vscode.window.showErrorMessage("Please select a valid folder.");
 			return;
@@ -129,7 +134,16 @@ export function activate(context: vscode.ExtensionContext) {
 		for (const file of javaFiles) {
 			await processJavaFile(file, uri.fsPath, mode);
 		}
-		vscode.window.showInformationMessage("Processed all Java files successfully.");
+
+		// Save usage summary and show results
+		const usage = logger.getUsage();
+		logger.saveUsageSummary();
+		const summary = `Processed ${usage.methodCount} methods (${usage.failureCount} failed). ` +
+			`Tokens: ${usage.totalTokens.toLocaleString()} total ` +
+			`(${usage.promptTokens.toLocaleString()} prompt, ${usage.completionTokens.toLocaleString()} completion). ` +
+			`Log: ${logger.getLogFile()}`;
+		vscode.window.showInformationMessage(summary);
+		console.log(`[LLMProcessor] ${summary}`);
 
 		// Stop timing and log elapsed time
 		console.timeEnd("[DEBUG] Total processing time");
@@ -277,7 +291,9 @@ export function activate(context: vscode.ExtensionContext) {
 								console.warn(`[LLMProcessor] Failed to add missing imports: ${e}`);
 							}
 
-							vscode.window.showInformationMessage(`Successfully regenerated method: ${methodName}`);
+							const usage = getLogger().getUsage();
+							const tokenInfo = usage.totalTokens > 0 ? ` (${usage.totalTokens.toLocaleString()} tokens used)` : '';
+							vscode.window.showInformationMessage(`Successfully regenerated method: ${methodName}${tokenInfo}`);
 							return;
 						} else if (choice === 'discard') {
 							vscode.window.showInformationMessage(`Discarded generated code for: ${methodName}`);

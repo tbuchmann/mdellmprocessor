@@ -105,11 +105,22 @@
           "minimum": 0,
           "description": "Maximum total characters of context files sent to the LLM. Set to 0 for no limit."
         },
+        "aiServer.contextMaxCharsBatch": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Maximum total characters of context files sent to the LLM in batch mode. Set to 0 to use the same value as contextMaxChars."
+        },
         "aiServer.retryAttempts": {
           "type": "number",
           "default": 2,
           "minimum": 0,
           "description": "Number of retry attempts on transient LLM failures"
+        },
+        "aiServer.logDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Directory for log files. Empty = workspace/mdellm-logs"
         }
       }
     },
