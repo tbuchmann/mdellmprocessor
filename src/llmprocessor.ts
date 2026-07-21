@@ -201,10 +201,10 @@ export async function processJavaFile(filePath: string, folderPath: string, mode
                 try {
                     // Build per-method context with the method's class as target
                     const batchMaxChars = vscode.workspace.getConfiguration("aiServer").get<number>("contextMaxCharsBatch", 0);
-                    const contextText = getAllJavaFilesContent(folderPath, filePath, batchMaxChars > 0 ? batchMaxChars : undefined);
+                    const contextResult = getAllJavaFilesContent(folderPath, filePath, batchMaxChars > 0 ? batchMaxChars : undefined);
 
                     // Wait for the AI response
-                    const llmResponse = await sendToAI(matchItem.promptContent, contextText, className, matchItem.methodName, mode);
+                    const llmResponse = await sendToAI(matchItem.promptContent, contextResult.content, contextResult.files, className, matchItem.methodName, mode);
 
                     if (!llmResponse || !llmResponse.trim()) {
                         throw new Error(`Empty response from LLM`);
@@ -223,8 +223,15 @@ export async function processJavaFile(filePath: string, folderPath: string, mode
                     // Re-read content to account for previous insertions
                     content = fs.readFileSync(filePath, 'utf8');
                     
-                    // Recalculate indices based on updated content
-                    const updatedStartGenIndex = content.indexOf('// generated start', matchItem.javadocEndIndex);
+                    // Re-find the method's javadoc in the current content by searching for
+                    // the @prompt specification text. This is robust against index shifts
+                    // caused by earlier method insertions.
+                    const promptSnippet = matchItem.promptContent.substring(0, 60);
+                    const javadocPos = content.indexOf(promptSnippet);
+                    if (javadocPos === -1) {
+                        throw new Error(`Could not find @prompt specification for method ${matchItem.methodName} in current content`);
+                    }
+                    const updatedStartGenIndex = content.indexOf('// generated start', javadocPos);
                     if (updatedStartGenIndex === -1) {
                         throw new Error(`Generated start marker not found for method ${matchItem.methodName}`);
                     }
@@ -335,7 +342,12 @@ function sendPrompt(prompt: string, method: string): string {
     return promptResult;
 }
 */
-function getAllJavaFilesContent(folderPath: string, targetFilePath?: string, maxCharsOverride?: number): string {
+export interface ContextResult {
+    content: string;
+    files: string[];
+}
+
+function getAllJavaFilesContent(folderPath: string, targetFilePath?: string, maxCharsOverride?: number): ContextResult {
     const config = vscode.workspace.getConfiguration("aiServer");
     const maxChars = maxCharsOverride ?? config.get<number>("contextMaxChars", 50000);
 
@@ -353,16 +365,17 @@ function getAllJavaFilesContent(folderPath: string, targetFilePath?: string, max
     };
     collectJavaFiles(folderPath);
 
-    // Sort files by relevance to the target file
-    const sortedFiles = targetFilePath
-        ? sortFilesByRelevance(javaFiles, targetFilePath)
+    // Select only relevant files: target + interface + imports
+    const relevantFiles = targetFilePath
+        ? getRelevantFiles(javaFiles, targetFilePath)
         : javaFiles;
 
     const parts: string[] = [];
+    const includedFiles: string[] = [];
     let totalChars = 0;
     let truncated = false;
 
-    for (const filePath of sortedFiles) {
+    for (const filePath of relevantFiles) {
         const relativeName = path.relative(folderPath, filePath);
         const content = fs.readFileSync(filePath, 'utf8');
         const part = "### `" + relativeName + "`\n```java\n" + content + "```";
@@ -373,106 +386,65 @@ function getAllJavaFilesContent(folderPath: string, targetFilePath?: string, max
         }
 
         parts.push(part);
+        includedFiles.push(relativeName);
         totalChars += part.length;
     }
 
     if (truncated) {
-        console.warn(`[LLMProcessor] Context truncated at ${totalChars} chars (${parts.length}/${javaFiles.length} files) due to contextMaxChars=${maxChars}`);
-        vscode.window.showWarningMessage(`Context truncated: ${parts.length}/${javaFiles.length} files included (${totalChars} chars). Increase 'aiServer.contextMaxChars' to include more.`);
+        console.warn(`[LLMProcessor] Context truncated at ${totalChars} chars (${parts.length}/${relevantFiles.length} relevant files) due to contextMaxChars=${maxChars}`);
+        vscode.window.showWarningMessage(`Context truncated: ${parts.length}/${relevantFiles.length} relevant files included (${totalChars} chars). Increase 'aiServer.contextMaxChars' to include more.`);
     } else {
-        console.log(`[LLMProcessor] Context: ${parts.length}/${javaFiles.length} files, ${totalChars} chars`);
+        console.log(`[LLMProcessor] Context: ${parts.length}/${javaFiles.length} files (${relevantFiles.length} relevant), ${totalChars} chars`);
     }
 
-    return parts.join("\n\n");
+    return { content: parts.join("\n\n"), files: includedFiles };
 }
 
 /**
- * Sorts Java files by relevance to the target file.
+ * Returns only the files relevant to the target file:
+ *   1. The target file itself
+ *   2. The direct interface (e.g. DeliveryAddressService for DeliveryAddressServiceImpl)
+ *   3. Files explicitly imported by the target file
  *
- * Uses a two-tier approach:
- *   1. Parses the import statements in the target file and maps them to file paths.
- *   2. Falls back to name-based heuristics for files not covered by imports.
- *
- * Priority:
- *   0. The target file itself
- *   1. Direct interface (e.g. DeliveryAddressService for DeliveryAddressServiceImpl)
- *   2. Files explicitly imported by the target file
- *   3. Repositories matching the concept
- *   4. Domain entities matching the concept
- *   5. DTOs
- *   6. Other files in the same package
- *   7. Everything else
+ * Files not referenced by the target file are excluded to keep the context
+ * focused and avoid wasting the LLM's attention on irrelevant code.
  */
-function sortFilesByRelevance(files: string[], targetFilePath: string): string[] {
+function getRelevantFiles(files: string[], targetFilePath: string): string[] {
     const targetName = path.basename(targetFilePath, '.java');
     // Strip "Impl" if present to get the base name (e.g. DeliveryAddressServiceImpl -> DeliveryAddressService)
     const baseName = targetName.endsWith('Impl') ? targetName.slice(0, -4) : targetName;
-    // Extract the core concept (e.g. DeliveryAddressService -> DeliveryAddress)
-    const conceptMatch = baseName.match(/^(.+?)(?:Service|Controller|Repository)?$/);
-    const concept = conceptMatch ? conceptMatch[1] : baseName;
 
     // Parse imports from the target file
     const importedFiles = parseImportedFiles(targetFilePath, files);
 
-    const targetUri = targetFilePath;
+    const result: string[] = [];
+    const seen = new Set<string>();
 
-    const score = (filePath: string): number => {
-        const fileName = path.basename(filePath, '.java');
-
-        // The target file itself
-        if (filePath === targetUri || fileName === targetName) {
-            return 0;
+    const addIfPresent = (filePath: string) => {
+        if (!seen.has(filePath)) {
+            seen.add(filePath);
+            result.push(filePath);
         }
-
-        // Direct interface (e.g. DeliveryAddressService for DeliveryAddressServiceImpl)
-        if (fileName === baseName || fileName === baseName + 'Impl') {
-            return 1;
-        }
-
-        // Files explicitly imported by the target file
-        if (importedFiles.has(filePath)) {
-            return 2;
-        }
-
-        // Repositories matching the concept
-        if (fileName.includes('Repository') && fileName.includes(concept)) {
-            return 3;
-        }
-
-        // Domain entities matching the concept
-        if (fileName.includes(concept) && !fileName.includes('Impl')) {
-            return 4;
-        }
-
-        // DTOs
-        if (fileName.toLowerCase().includes('dto') || fileName.includes('Request') || fileName.includes('Response') || fileName.includes('Snapshot')) {
-            return 5;
-        }
-
-        // Other repositories
-        if (fileName.includes('Repository')) {
-            return 6;
-        }
-
-        // Other files in the same package
-        const targetDir = path.dirname(targetFilePath);
-        const fileDir = path.dirname(filePath);
-        if (targetDir === fileDir) {
-            return 7;
-        }
-
-        // Everything else
-        return 8;
     };
 
-    return [...files].sort((a, b) => {
-        const scoreA = score(a);
-        const scoreB = score(b);
-        if (scoreA !== scoreB) {
-            return scoreA - scoreB;
+    // 1. The target file itself
+    addIfPresent(targetFilePath);
+
+    // 2. Direct interface (e.g. DeliveryAddressService for DeliveryAddressServiceImpl)
+    for (const filePath of files) {
+        const fileName = path.basename(filePath, '.java');
+        if (fileName === baseName && filePath !== targetFilePath) {
+            addIfPresent(filePath);
+            break;
         }
-        return path.basename(a).localeCompare(path.basename(b));
-    });
+    }
+
+    // 3. Files explicitly imported by the target file
+    for (const filePath of importedFiles) {
+        addIfPresent(filePath);
+    }
+
+    return result;
 }
 
 /**
@@ -515,7 +487,7 @@ function parseImportedFiles(targetFilePath: string, allFiles: string[]): Set<str
     return result;
 }
 
-export function getAllJavaFilesContentExported(folderPath: string, targetFilePath?: string, maxCharsOverride?: number): string {
+export function getAllJavaFilesContentExported(folderPath: string, targetFilePath?: string, maxCharsOverride?: number): ContextResult {
     return getAllJavaFilesContent(folderPath, targetFilePath, maxCharsOverride);
 }
 
@@ -681,7 +653,7 @@ function isResponseValidJava(response: string): boolean {
     return true;
 }
 
-export async function sendToAI(prompt: string, context: string, className: string, methodName: string, mode: SystemPromptMode = 'default') : Promise<string> {
+export async function sendToAI(prompt: string, context: string, contextFiles: string[], className: string, methodName: string, mode: SystemPromptMode = 'default') : Promise<string> {
   const config = vscode.workspace.getConfiguration("aiServer");
   const serverType = config.get<string>("type", "llama");
   const llmModel = config.get<string>("model", "qwen2.5-coder:7b");
@@ -745,6 +717,7 @@ export async function sendToAI(prompt: string, context: string, className: strin
                       status: 'success',
                       usage,
                       attempt: attempt + 1,
+                      contextFiles,
                   });
                   if (usage) {
                       console.log(`[LLMProcessor] Tokens for ${methodName}: prompt=${usage.promptTokens}, completion=${usage.completionTokens}, total=${usage.totalTokens}`);
@@ -789,6 +762,7 @@ export async function sendToAI(prompt: string, context: string, className: strin
                   error: lastError.message,
                   usage: lastInvalidUsage,
                   attempt: retryAttempts + 1,
+                  contextFiles,
               });
               return "";
               }
@@ -807,6 +781,7 @@ export async function sendToAI(prompt: string, context: string, className: strin
                   error: lastError.message,
                   usage: lastInvalidUsage,
                   attempt: retryAttempts + 1,
+                  contextFiles,
               });
               return lastInvalidResponse;
           }
@@ -822,6 +797,7 @@ export async function sendToAI(prompt: string, context: string, className: strin
               status: 'failed',
               error: lastError.message,
               attempt: retryAttempts + 1,
+              contextFiles,
           });
       }
   }

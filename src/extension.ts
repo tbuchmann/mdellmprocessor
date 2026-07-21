@@ -229,12 +229,12 @@ export function activate(context: vscode.ExtensionContext) {
 				cancellable: false,
 			},
 			async (progress) => {
-				const contextText = getAllJavaFilesContentExported(folderPath, doc.uri.fsPath);
+				const contextResult = getAllJavaFilesContentExported(folderPath, doc.uri.fsPath);
 
 				let attempt = 0;
 				while (true) {
 					attempt++;
-					const llmResponse = await sendToAILLM(promptContent, contextText, className, methodName, mode);
+					const llmResponse = await sendToAILLM(promptContent, contextResult.content, contextResult.files, className, methodName, mode);
 
 					if (!llmResponse) {
 						vscode.window.showErrorMessage(`Failed to generate code for method: ${methodName}`);

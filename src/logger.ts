@@ -19,10 +19,12 @@ export interface LogEntry {
     error?: string;
     usage?: TokenUsage;
     attempt: number;
+    contextFiles?: string[];
 }
 
 export class GenerationLogger {
-    private logFile: string;
+    private runDir: string;
+    private errorFile: string;
     private usageFile: string;
     private totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     private methodCount = 0;
@@ -34,8 +36,10 @@ export class GenerationLogger {
             fs.mkdirSync(logDir, { recursive: true });
         }
         const timestamp = this.getTimestampForFilename();
-        this.logFile = path.join(logDir, `mdellm-${timestamp}.log`);
-        this.usageFile = path.join(logDir, `mdellm-${timestamp}.usage.json`);
+        this.runDir = path.join(logDir, `mdellm-${timestamp}`);
+        fs.mkdirSync(this.runDir, { recursive: true });
+        this.errorFile = path.join(this.runDir, 'errors.log');
+        this.usageFile = path.join(this.runDir, 'usage.json');
     }
 
     private getLogDirectory(): string {
@@ -62,9 +66,19 @@ export class GenerationLogger {
         return new Date().toISOString();
     }
 
+    private sanitize(name: string): string {
+        return name.replace(/[^a-zA-Z0-9_-]/g, '_');
+    }
+
     log(entry: LogEntry): void {
+        const safeClassName = this.sanitize(entry.className);
+        const safeMethodName = this.sanitize(entry.methodName);
+        const methodFile = path.join(
+            this.runDir,
+            `${safeClassName}-${safeMethodName}-attempt${entry.attempt}.log`
+        );
+
         const lines: string[] = [];
-        lines.push(`========================================`);
         lines.push(`Timestamp: ${entry.timestamp}`);
         lines.push(`Class: ${entry.className}`);
         lines.push(`Method: ${entry.methodName}`);
@@ -77,6 +91,12 @@ export class GenerationLogger {
         if (entry.usage) {
             lines.push(`Tokens: prompt=${entry.usage.promptTokens}, completion=${entry.usage.completionTokens}, total=${entry.usage.totalTokens}`);
         }
+        if (entry.contextFiles && entry.contextFiles.length > 0) {
+            lines.push(`--- Context Files (${entry.contextFiles.length}) ---`);
+            for (const f of entry.contextFiles) {
+                lines.push(`- ${f}`);
+            }
+        }
         lines.push(`--- Prompt ---`);
         lines.push(entry.prompt);
         lines.push(`--- Response ---`);
@@ -88,7 +108,7 @@ export class GenerationLogger {
             lines.push(`Total tokens: ${entry.usage.totalTokens}`);
         }
         lines.push('');
-        fs.appendFileSync(this.logFile, lines.join('\n') + '\n', 'utf8');
+        fs.writeFileSync(methodFile, lines.join('\n') + '\n', 'utf8');
 
         // Track usage
         if (entry.usage) {
@@ -99,6 +119,18 @@ export class GenerationLogger {
         this.methodCount++;
         if (entry.status !== 'success') {
             this.failureCount++;
+            // Append to errors.log
+            const errorLines: string[] = [];
+            errorLines.push(`[${entry.timestamp}] ${entry.className}.${entry.methodName} (attempt ${entry.attempt}, mode ${entry.mode}): ${entry.status}`);
+            if (entry.error) {
+                errorLines.push(`  Error: ${entry.error}`);
+            }
+            if (entry.usage) {
+                errorLines.push(`  Tokens: prompt=${entry.usage.promptTokens}, completion=${entry.usage.completionTokens}, total=${entry.usage.totalTokens}`);
+            }
+            errorLines.push(`  Log: ${path.basename(methodFile)}`);
+            errorLines.push('');
+            fs.appendFileSync(this.errorFile, errorLines.join('\n') + '\n', 'utf8');
         }
     }
 
@@ -127,7 +159,7 @@ export class GenerationLogger {
     }
 
     getLogFile(): string {
-        return this.logFile;
+        return this.runDir;
     }
 }
 
